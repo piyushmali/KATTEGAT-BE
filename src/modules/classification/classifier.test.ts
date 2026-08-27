@@ -140,4 +140,65 @@ describe('classifyAgent', () => {
     const result = classifyAgent(agent('', null, []));
     expect(result[0]?.category).toBe('uncategorized');
   });
+
+  /*
+   * Regression: hierarchical OASF skill identifiers.
+   *
+   * Real agents on BNB Smart Chain publish capabilities as taxonomy paths. Six of
+   * them (ids 15-20) were classified as grid-trading bots because the matcher used
+   * `capability.includes('grid')` and the list below contains `energy/smart_grids`.
+   * This is the actual capability list from those agents, trimmed.
+   */
+  const OASF_CAPABILITIES = [
+    'advanced_reasoning_planning/strategic_planning',
+    'agent_orchestration/agent_coordination',
+    'agriculture/livestock_management',
+    'energy/smart_grids',
+    'finance_and_business/banking',
+    'finance_and_business/finance',
+    'government_and_public_sector/public_infrastructure',
+    'marketing_and_advertising/market_research',
+    'retail_and_ecommerce/inventory_management',
+  ];
+
+  it('does not read energy/smart_grids as a grid-trading capability', () => {
+    const result = classifyAgent(agent('8004AI', '8004AI8004AI8004AI', OASF_CAPABILITIES));
+
+    expect(result[0]?.category).toBe('uncategorized');
+    expect(result.map((entry) => entry.category)).not.toContain('grid-trading');
+  });
+
+  it('does not read finance_and_business/finance as a DeFi category', () => {
+    // "finance" and "banking" are domains, not one of the four strategies.
+    const result = classifyAgent(agent('Bank Helper', 'General banking assistant.', [
+      'finance_and_business/banking',
+      'finance_and_business/finance',
+    ]));
+
+    expect(result[0]?.category).toBe('uncategorized');
+  });
+
+  it('still matches a capability expressed as a taxonomy path', () => {
+    // The fix must not break legitimate hierarchical capabilities.
+    const result = classifyAgent(
+      agent('Range Bot', null, ['trading/grid-trading', 'defi/market-making']),
+    );
+
+    expect(result[0]?.category).toBe('grid-trading');
+    expect(result[0]?.signals.some((signal) => signal.startsWith('capability:'))).toBe(true);
+  });
+
+  it('treats underscore and hyphen separators as equivalent', () => {
+    const underscore = classifyAgent(agent('A', null, ['defi/grid_trading']));
+    const hyphen = classifyAgent(agent('A', null, ['defi/grid-trading']));
+
+    expect(underscore[0]?.category).toBe('grid-trading');
+    expect(hyphen[0]?.category).toBe('grid-trading');
+  });
+
+  it('does not match a term that is only part of a longer word', () => {
+    // "grids" must not satisfy "grid", or the smart_grids bug returns.
+    expect(classifyAgent(agent('A', null, ['energy/grids']))[0]?.category).toBe('uncategorized');
+    expect(classifyAgent(agent('A', null, ['x/yielding']))[0]?.category).toBe('uncategorized');
+  });
 });

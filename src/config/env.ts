@@ -54,7 +54,13 @@ const envSchema = z
     ERC8004_IDENTITY_REGISTRY: evmAddress.prefault('0x8004A169FB4a3325136EB29fA0ceB6D2e539a432'),
     ERC8004_REPUTATION_REGISTRY: evmAddress.prefault('0x8004BAa17C55a88189AE136b182e5fdA19dE9b63'),
     ERC8004_DEPLOY_BLOCK: z.coerce.number().int().min(0).default(0),
-    ERC8004_LOG_CHUNK_SIZE: z.coerce.number().int().min(100).max(50_000).default(2_000),
+    /**
+     * eth_getLogs window size. The floor is 1, not a comfortable round number:
+     * Alchemy's free tier caps this method at 10 blocks, so a minimum of 100 would
+     * reject a perfectly valid configuration. Providers differ wildly here — see
+     * docs/integrations.md for the measured limits.
+     */
+    ERC8004_LOG_CHUNK_SIZE: z.coerce.number().int().min(1).max(50_000).default(2_000),
     /**
      * Hard cap on how far back a sync will look. Public BSC endpoints only serve
      * a short window of logs (measured at ~8k blocks); asking for more returns an

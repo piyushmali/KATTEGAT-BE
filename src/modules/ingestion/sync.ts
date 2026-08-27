@@ -44,6 +44,150 @@ export interface SyncOptions {
 
 const DEFAULT_MAX_REPUTATION_READS = 60;
 
+/** Agent ids resolved per pass. Bounded so a run is interruptible and resumable. */
+const BACKFILL_BATCH = 150;
+
+export interface BackfillResult {
+  mode: 'backfill';
+  fromId: number;
+  toId: number;
+  highestAgentId: number;
+  discovered: number;
+  persisted: number;
+  unresolvedMetadata: number;
+  /** Ids remaining after this pass. */
+  remaining: number;
+}
+
+/**
+ * Backfills the registry by walking agent ids.
+ *
+ * The reason this exists rather than just widening the log scan: no free RPC tier
+ * can serve the registry's log history. publicnode retains ~8k blocks and
+ * Alchemy's free tier caps `eth_getLogs` at 10 blocks, so log replay can only ever
+ * see the last hour or two of registrations. Ids are readable with plain `eth_call`
+ * with no retention limit, so this path can reach all ~310k agents.
+ *
+ * Progress is stored under its own cursor, so a run can be stopped and resumed, and
+ * it never interferes with the incremental log cursor.
+ */
+export async function backfillAgents(
+  options: SyncOptions & { limit?: number },
+): Promise<BackfillResult> {
+  const { db, logger, source, repository } = options;
+  const cursorId = `${String(source.chainId)}:identity:backfill`;
+  const now = new Date();
+
+  const [existing] = await db.select().from(syncState).where(eq(syncState.id, cursorId)).limit(1);
+  const highest = await source.highestAgentId();
+
+  // `lastBlock` stores the last agent id for this cursor. Reusing the column keeps
+  // one table for both strategies; the cursor id says which unit it is in.
+  const startId = (existing?.lastBlock ?? 0) + 1;
+
+  if (startId > highest) {
+    logger.info({ highest }, 'backfill already complete');
+    return {
+      mode: 'backfill',
+      fromId: startId,
+      toId: highest,
+      highestAgentId: highest,
+      discovered: 0,
+      persisted: 0,
+      unresolvedMetadata: 0,
+      remaining: 0,
+    };
+  }
+
+  const budget = options.limit ?? BACKFILL_BATCH;
+  const endId = Math.min(startId + budget - 1, highest);
+
+  logger.info({ fromId: startId, toId: endId, highest }, 'backfill starting');
+
+  try {
+    const page = await source.discoverByIdRange(startId, endId);
+
+    const payloads: AgentWritePayload[] = page.agents.map((discovered) => ({
+      agent: {
+        id: discovered.identity.id,
+        chainId: discovered.identity.chainId,
+        agentId: discovered.identity.agentId,
+        ownerAddress: discovered.identity.ownerAddress,
+        walletAddress: discovered.identity.walletAddress,
+        agentUri: discovered.identity.agentUri,
+        name: discovered.profile.name,
+        description: discovered.profile.description,
+        protocolTag: discovered.profile.protocolTag,
+        traitTags: discovered.profile.traitTags,
+        capabilities: discovered.profile.capabilities,
+        rawMetadata: discovered.rawMetadata,
+        registeredAtBlock: discovered.identity.registeredAtBlock,
+        registeredAt: discovered.identity.registeredAt,
+        source: source.name,
+        metadataResolvedAt: discovered.profile.metadataResolvedAt,
+        lastSyncedAt: now,
+      },
+      categories: classifyAgent({
+        name: discovered.profile.name,
+        description: discovered.profile.description,
+        capabilities: discovered.profile.capabilities,
+      }),
+      // Reputation is left to the incremental sync and the live endpoint: two extra
+      // RPC calls per agent across 310k agents would dominate the run for data that
+      // is read live on the detail page anyway.
+      reputation: null,
+    }));
+
+    const persisted = await repository.upsertMany(payloads);
+
+    const cursorValues = {
+      id: cursorId,
+      lastBlock: page.cursor,
+      lastRunAt: now,
+      lastSuccessAt: now,
+      lastError: null,
+      consecutiveFailures: 0,
+    };
+    await db
+      .insert(syncState)
+      .values(cursorValues)
+      .onConflictDoUpdate({ target: syncState.id, set: cursorValues });
+
+    const result: BackfillResult = {
+      mode: 'backfill',
+      fromId: startId,
+      toId: page.cursor,
+      highestAgentId: highest,
+      discovered: page.agents.length,
+      persisted,
+      unresolvedMetadata: page.unresolved.length,
+      remaining: Math.max(0, highest - page.cursor),
+    };
+
+    logger.info(result, 'backfill pass complete');
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const failures = (existing?.consecutiveFailures ?? 0) + 1;
+
+    await db
+      .insert(syncState)
+      .values({
+        id: cursorId,
+        lastBlock: existing?.lastBlock ?? 0,
+        lastRunAt: now,
+        lastError: message.slice(0, 500),
+        consecutiveFailures: failures,
+      })
+      .onConflictDoUpdate({
+        target: syncState.id,
+        set: { lastRunAt: now, lastError: message.slice(0, 500), consecutiveFailures: failures },
+      });
+
+    throw error;
+  }
+}
+
 export async function syncAgents(options: SyncOptions): Promise<SyncResult> {
   const { env, db, logger, source, repository } = options;
   const cursorId = `${String(source.chainId)}:identity`;

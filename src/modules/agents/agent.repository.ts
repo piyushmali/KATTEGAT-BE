@@ -194,7 +194,17 @@ export function createAgentRepository(db: Database): AgentRepository {
         ];
       case 'registered_at':
       default:
-        return [sql`${agents.registeredAt} ${sql.raw(direction)} nulls last`];
+        /*
+         * Agent id is the tiebreaker, not decoration. Agents discovered by the
+         * ID-walk backfill have no `registered_at` — the timestamp lives in a
+         * `Registered` log that path deliberately does not read. Ids are minted
+         * sequentially, so ordering by id is ordering by registration for exactly
+         * those rows, instead of dumping them in an arbitrary heap at the end.
+         */
+        return [
+          sql`${agents.registeredAt} ${sql.raw(direction)} nulls last`,
+          sql`${agents.agentId} ${sql.raw(direction)}`,
+        ];
     }
   }
 

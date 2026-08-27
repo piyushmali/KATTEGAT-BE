@@ -42,13 +42,47 @@ const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 /** How many registration files to fetch at once. Keeps IPFS gateways happy. */
 const METADATA_CONCURRENCY = 5;
 
+/**
+ * Agent ids per Multicall3 request during an ID-walk backfill.
+ *
+ * `tokenURI` returns a full URI per agent, so the response grows fast; 120 keeps a
+ * single call comfortably inside typical RPC response limits.
+ */
+const ID_MULTICALL_CHUNK = 120;
+
 export interface ChainReaderOptions {
   env: Env;
   logger: Logger;
 }
 
+/**
+ * An agent found on chain, before its off-chain registration file is resolved.
+ *
+ * Both discovery strategies produce this shape so they can share one resolver.
+ * `registeredAt*` are nullable because the ID-walk path never reads the log that
+ * carries the block, and guessing would be worse than admitting it.
+ */
+interface AgentCandidate {
+  agentId: number;
+  agentUri: string | null;
+  owner: string;
+  walletAddress: string | null;
+  registeredAtBlock: number | null;
+  registeredAt: Date | null;
+}
+
 /** Adds chain-specific helpers the generic `AgentSource` contract has no use for. */
 export interface ChainAgentSource extends AgentSource {
+  /**
+   * Highest minted agent id, which for ERC-8004's sequential counter is also the
+   * total number of agents ever registered.
+   */
+  highestAgentId(): Promise<number>;
+  /**
+   * Discovers agents by id instead of by log replay. The backfill path — reaches
+   * the whole registry, where log replay is bounded by RPC log retention.
+   */
+  discoverByIdRange(fromId: number, toId: number): Promise<DiscoveryPage>;
   /**
    * Oldest block this endpoint will actually serve `eth_getLogs` for.
    *
@@ -177,28 +211,51 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
     const timestamps = await blockTimestamps(hits.map((hit) => hit.blockNumber));
     const wallets = await agentWallets(hits.map((hit) => hit.agentId));
 
+    const page = await resolveCandidates(
+      hits.map((hit) => ({
+        agentId: Number(hit.agentId),
+        agentUri: hit.agentUri.length > 0 ? hit.agentUri : null,
+        owner: hit.owner,
+        walletAddress: wallets.get(hit.agentId) ?? null,
+        registeredAtBlock: Number(hit.blockNumber),
+        registeredAt: timestamps.get(hit.blockNumber) ?? null,
+      })),
+    );
+
+    return { ...page, cursor: processedTo };
+  }
+
+  /**
+   * Turns on-chain candidates into domain agents by resolving their registration
+   * files.
+   *
+   * Shared by both discovery strategies — log replay and ID walk — so the two
+   * cannot disagree about how an agent is normalised or how a broken metadata
+   * document is handled.
+   */
+  async function resolveCandidates(
+    candidates: AgentCandidate[],
+  ): Promise<Omit<DiscoveryPage, 'cursor'>> {
     const agents: DiscoveredAgent[] = [];
     const unresolved: { id: string; reason: string }[] = [];
 
-    for (let i = 0; i < hits.length; i += METADATA_CONCURRENCY) {
-      const batch = hits.slice(i, i + METADATA_CONCURRENCY);
+    for (let i = 0; i < candidates.length; i += METADATA_CONCURRENCY) {
+      const batch = candidates.slice(i, i + METADATA_CONCURRENCY);
 
       const resolved = await Promise.all(
-        batch.map(async (hit) => {
-          const numericId = Number(hit.agentId);
+        batch.map(async (candidate) => {
+          const numericId = candidate.agentId;
           const id = toGlobalId(numericId);
-          const wallet = wallets.get(hit.agentId) ?? null;
-          const registeredAt = timestamps.get(hit.blockNumber) ?? null;
 
           const identity = {
             id,
             chainId: bsc.id,
             agentId: numericId,
-            ownerAddress: hit.owner.toLowerCase(),
-            walletAddress: wallet,
-            agentUri: hit.agentUri.length > 0 ? hit.agentUri : null,
-            registeredAtBlock: Number(hit.blockNumber),
-            registeredAt,
+            ownerAddress: candidate.owner.toLowerCase(),
+            walletAddress: candidate.walletAddress,
+            agentUri: candidate.agentUri,
+            registeredAtBlock: candidate.registeredAtBlock,
+            registeredAt: candidate.registeredAt,
           };
 
           if (identity.agentUri === null) {
@@ -272,7 +329,148 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
       }
     }
 
-    return { agents, cursor: processedTo, unresolved };
+    return { agents, unresolved };
+  }
+
+  /**
+   * Highest minted agent id, found by bisecting `ownerOf`.
+   *
+   * ERC-8004 mints ids from a sequential counter, so the highest minted id is also
+   * the agent count. `ownerOf` reverts for an id that was never minted, which makes
+   * the boundary bisectable in ~20 calls.
+   */
+  async function highestAgentId(): Promise<number> {
+    const exists = async (id: number): Promise<boolean> => {
+      try {
+        await client.readContract({
+          address: identityAddress,
+          abi: identityRegistryAbi,
+          functionName: 'ownerOf',
+          args: [BigInt(id)],
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    if (!(await exists(1))) return 0;
+
+    // Grow an upper bound first: the registry's size is unknown, and doubling
+    // finds a ceiling in log(n) calls without assuming a maximum.
+    let low = 1;
+    let high = 2;
+    while (await exists(high)) {
+      low = high;
+      high *= 2;
+      if (high > 1_000_000_000) break;
+    }
+
+    while (high - low > 1) {
+      const mid = Math.floor((low + high) / 2);
+      if (await exists(mid)) low = mid;
+      else high = mid;
+    }
+
+    return low;
+  }
+
+  /**
+   * Discovers agents by walking ids rather than replaying logs.
+   *
+   * This is the backfill path, and it exists because log replay cannot reach the
+   * registry's history: free RPC tiers retain only a short window of logs (~8k
+   * blocks on publicnode) and Alchemy's free tier caps `eth_getLogs` at 10 blocks.
+   * Ids, by contrast, are readable with plain `eth_call` on any endpoint with no
+   * retention limit at all — so the full registry is reachable this way.
+   *
+   * The trade-off is that `registeredAt` is unknown here: the timestamp lives in the
+   * `Registered` log we are deliberately not reading. It is left null rather than
+   * guessed. Ids are monotonic with registration order, so the repository falls back
+   * to ordering by agent id when the date is missing.
+   */
+  async function discoverByIdRange(fromId: number, toId: number): Promise<DiscoveryPage> {
+    const start = Math.max(1, fromId);
+    if (toId < start) return { agents: [], cursor: start - 1, unresolved: [] };
+
+    const ids = Array.from({ length: toId - start + 1 }, (_, index) => BigInt(start + index));
+
+    /**
+     * Reads one method for every id, chunked.
+     *
+     * Chunking is not optional: a single Multicall3 call bundling thousands of
+     * `tokenURI` reads returns megabytes and exceeds the node's response limit, so a
+     * large `--limit` would fail as one indivisible request. Chunking makes any limit
+     * safe and keeps each response small.
+     */
+    const read = async <T>(functionName: 'ownerOf' | 'tokenURI' | 'getAgentWallet') => {
+      const out: { status: 'success' | 'failure'; result?: T }[] = [];
+
+      for (let i = 0; i < ids.length; i += ID_MULTICALL_CHUNK) {
+        const slice = ids.slice(i, i + ID_MULTICALL_CHUNK);
+        const results = await client.multicall({
+          allowFailure: true,
+          contracts: slice.map((agentId) => ({
+            address: identityAddress,
+            abi: identityRegistryAbi,
+            functionName,
+            args: [agentId] as const,
+          })),
+        });
+        out.push(...(results as { status: 'success' | 'failure'; result?: T }[]));
+      }
+
+      return out;
+    };
+
+    let owners: { status: 'success' | 'failure'; result?: string }[];
+    let uris: { status: 'success' | 'failure'; result?: string }[];
+    let wallets: { status: 'success' | 'failure'; result?: string }[];
+
+    try {
+      [owners, uris, wallets] = await Promise.all([
+        read<string>('ownerOf'),
+        read<string>('tokenURI'),
+        read<string>('getAgentWallet'),
+      ]);
+    } catch (error) {
+      throw upstreamUnavailable('multicall for agent ids failed', {
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    const candidates: AgentCandidate[] = [];
+
+    ids.forEach((agentId, index) => {
+      const owner = owners[index];
+      // A failed ownerOf means the id was never minted — a gap, not an error.
+      if (!owner || owner.status !== 'success' || typeof owner.result !== 'string') return;
+
+      const uri = uris[index];
+      const wallet = wallets[index];
+      const walletAddress =
+        wallet?.status === 'success' && typeof wallet.result === 'string'
+          ? wallet.result === ZERO_ADDRESS
+            ? null
+            : wallet.result.toLowerCase()
+          : null;
+      const agentUri =
+        uri?.status === 'success' && typeof uri.result === 'string' && uri.result.length > 0
+          ? uri.result
+          : null;
+
+      candidates.push({
+        agentId: Number(agentId),
+        agentUri,
+        owner: owner.result,
+        walletAddress,
+        registeredAtBlock: null,
+        registeredAt: null,
+      });
+    });
+
+    const page = await resolveCandidates(candidates);
+    return { ...page, cursor: toId };
   }
 
   /** Batched `getAgentWallet` reads. Falls back to per-call on multicall failure. */
@@ -449,6 +647,8 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
     oldestAvailableLogBlock,
     registryName,
     resolveStartBlock,
+    highestAgentId,
+    discoverByIdRange,
   };
 }
 

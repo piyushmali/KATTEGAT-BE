@@ -87,11 +87,16 @@ export const CATEGORY_RULES: readonly CategoryRule[] = [
     label: 'Grid Trading',
     description:
       'Places a ladder of staggered orders across a price range and works the range as the market oscillates.',
+    /*
+     * Deliberately no bare `grid`. The OASF skill taxonomy real agents publish
+     * includes `energy/smart_grids`, which has nothing to do with trading — a
+     * one-word `grid` term matched six unrelated agents before this was tightened.
+     */
     capabilityTerms: [
-      'grid',
       'grid-trading',
       'grid_trading',
       'grid-bot',
+      'grid-strategy',
       'range-trading',
       'market-making',
     ],

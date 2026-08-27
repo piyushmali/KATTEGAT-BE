@@ -38,9 +38,22 @@ Use it whenever the registry addresses, RPC configuration or ABI subset change.
 ## Ingestion
 
 ```bash
-pnpm sync:agents          # incremental — resumes from the stored cursor
-pnpm sync:agents --full   # re-scan the widest window the RPC endpoint serves
+pnpm sync:agents                        # incremental — new Registered logs
+pnpm sync:agents --full                 # re-scan the widest log window available
+pnpm sync:agents --backfill             # walk agent ids — reaches the whole registry
+pnpm sync:agents --backfill --limit 400
+pnpm sync:agents --backfill --loop      # repeat until the registry is exhausted
 ```
+
+**Which one to run.** Incremental replays logs and is bounded by the endpoint's log
+retention — roughly two hours on any free tier, so it only ever sees recent
+registrations. Backfill walks agent ids with plain `eth_call`, which has no retention
+limit, and is the only way to reach the registry's ~310k historical agents. Run
+`--backfill --loop` once to build a catalogue, then plain `pnpm sync:agents` on a
+schedule to stay current.
+
+Backfill is resumable under its own cursor, so interrupting `--loop` loses at most one
+batch. Its cost is metadata fetching, not RPC: expect a few hundred agents per minute.
 
 A process rather than an in-server interval: ingestion and serving have different
 failure modes and scaling needs, and a cron entry is easier to observe than a

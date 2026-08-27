@@ -78,6 +78,16 @@ JSON `null` (`"image": null`), not by omitting the key. Zod's `.optional()` acce
 over a field nothing reads. The schema uses `.nullish()` throughout; resolution went
 from 33/235 to 242/243.
 
+**Capabilities are taxonomy paths, not words.** Real agents publish OASF skill
+identifiers such as `energy/smart_grids`, `finance_and_business/banking` and
+`advanced_reasoning_planning/strategic_planning`. The classifier originally matched a
+capability term with `capability.includes(term)`, which read `energy/smart_grids` as
+the grid-trading term `grid` and labelled six general-purpose agents as grid-trading
+bots. Capability matching is now whole-token against each `/`-delimited segment, and
+deliberately unstemmed — stemming would make `grid` match `grids` and reintroduce the
+same false positive. The offending capability list is pinned as a regression test in
+`classifier.test.ts`.
+
 ## RPC endpoints — the real constraint
 
 Most public BSC endpoints cannot serve `eth_getLogs`, which is the one method
@@ -87,6 +97,7 @@ ingestion depends on. Measured:
 | ------------------------------- | -------------------------------------- |
 | `bsc-rpc.publicnode.com`        | **works**, 2000-block windows fine     |
 | `bsc.rpc.blxrbdn.com`           | **works**, 2000-block windows fine     |
+| Alchemy (`bnb-mainnet`, free)   | capped at **10 blocks** — but archive state reads work |
 | `bsc-dataseed*.bnbchain.org`    | rejected — `limit exceeded` (-32005), even for 119 blocks |
 | `bsc-dataseed1.defibit.io`      | rejected — `limit exceeded`            |
 | `bsc.meowrpc.com`               | method not supported                   |
@@ -118,6 +129,48 @@ Consequences, and how the code handles them:
 
 Forward incremental sync works on the free endpoints indefinitely; only reaching
 backwards is limited.
+
+### The ID walk: why backfill does not use logs at all
+
+Log retention caps history at roughly two hours on any free tier, and Alchemy's free
+plan caps `eth_getLogs` at 10 blocks — so no free endpoint can replay the registry's
+log history. That looked like a hard wall until the constraint turned out to be
+avoidable rather than negotiable.
+
+ERC-8004 mints agent ids from a **sequential counter**, and `ownerOf(id)` reverts only
+for an id that was never minted. Verified on chain 56: `ownerOf(1)` resolves,
+`ownerOf(310063)` resolves, `ownerOf(400000)` reverts. So the whole registry is
+enumerable with plain `eth_call` — no logs, no archive access, no retention limit.
+
+`discoverByIdRange` therefore reads `ownerOf`, `tokenURI` and `getAgentWallet` for a
+range of ids via Multicall3 (chunked at 120 ids per call, because `tokenURI` returns a
+full URI per agent and a larger bundle exceeds response limits), then resolves each
+registration file through the same code path as log replay.
+
+`highestAgentId()` finds the ceiling by doubling then bisecting `ownerOf` — about 20
+calls. At the time of writing it reports **310,063 agents**.
+
+Two honest limitations:
+
+- **`registeredAt` is unknown on this path.** The timestamp lives in the `Registered`
+  log, which the ID walk deliberately does not read. It is stored as null rather than
+  guessed. Because ids are monotonic with registration order, the repository falls
+  back to ordering by agent id when the date is missing.
+- **Older agents often have dead metadata.** In the 1500–1900 id range, 392 of 400
+  registration files failed to resolve — early URIs have rotated or gone offline.
+  Those agents are still indexed with verified on-chain identity and
+  `metadata_resolved_at: null`.
+
+So the two strategies are complementary, not redundant:
+
+| Strategy   | Command                        | Reaches                  | Bounded by            |
+| ---------- | ------------------------------ | ------------------------ | --------------------- |
+| Log replay | `pnpm sync:agents`             | new registrations        | RPC log retention     |
+| ID walk    | `pnpm sync:agents --backfill`  | the entire registry      | metadata fetch time   |
+
+Backfill is resumable: progress is stored under its own `:backfill` cursor (the
+`last_block` column holds the last agent id), so `--loop` can be interrupted and
+loses at most one batch.
 
 ## ERC-8004 Explorer (QuickNode) — optional enrichment
 

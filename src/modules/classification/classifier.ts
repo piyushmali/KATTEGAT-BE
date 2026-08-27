@@ -57,18 +57,50 @@ function containsTerm(haystack: string, term: string): boolean {
   return pattern.test(haystack);
 }
 
+/** Lowercases and unifies separators so `smart_grids` and `smart grids` agree. */
 function normalizeCapability(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, '-');
+  return value.trim().toLowerCase().replace(/[\s_]+/g, '-');
 }
 
-function scoreRule(rule: CategoryRule, text: string, capabilities: string[]): Scored {
+/**
+ * Splits a capability into its path segments.
+ *
+ * Real registration files carry hierarchical OASF skill identifiers like
+ * `energy/smart_grids` or `finance_and_business/banking`, so a capability is a path,
+ * not a word.
+ */
+function capabilitySegments(capability: string): string[] {
+  return normalizeCapability(capability)
+    .split('/')
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+}
+
+/**
+ * Whole-token match of a term against one capability segment.
+ *
+ * Substring matching was the original implementation and it was wrong: the OASF
+ * taxonomy's `energy/smart_grids` contains "grid", so `capability.includes('grid')`
+ * classified six general-purpose agents as grid-trading bots. Requiring the term to
+ * occupy a whole hyphen-delimited token means `grid-trading` still matches while
+ * `smart-grids` does not.
+ *
+ * Note this is deliberately *not* stemmed. Stemming would make "grid" match "grids"
+ * and reintroduce exactly the false positive.
+ */
+function segmentMatchesTerm(segment: string, term: string): boolean {
+  if (segment === term) return true;
+  return segment.startsWith(`${term}-`) || segment.endsWith(`-${term}`) || segment.includes(`-${term}-`);
+}
+
+function scoreRule(rule: CategoryRule, text: string, capabilities: string[][]): Scored {
   let score = 0;
   const signals: string[] = [];
 
   for (const term of rule.capabilityTerms) {
     const normalizedTerm = normalizeCapability(term);
-    const hit = capabilities.some(
-      (capability) => capability === normalizedTerm || capability.includes(normalizedTerm),
+    const hit = capabilities.some((segments) =>
+      segments.some((segment) => segmentMatchesTerm(segment, normalizedTerm)),
     );
     if (hit) {
       score += SIGNAL_WEIGHTS.capability;
@@ -119,7 +151,9 @@ export function classifyAgent(input: ClassificationInput): AgentCategoryAssignme
     .join(' \n ')
     .toLowerCase()
     .replace(/\s+/g, ' ');
-  const capabilities = input.capabilities.map(normalizeCapability).filter((c) => c.length > 0);
+  const capabilities = input.capabilities
+    .map(capabilitySegments)
+    .filter((segments) => segments.length > 0);
 
   const scored = CATEGORY_RULES.map((rule) => scoreRule(rule, text, capabilities))
     .filter((entry) => entry.score > 0)
