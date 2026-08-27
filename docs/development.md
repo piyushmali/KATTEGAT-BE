@@ -153,5 +153,18 @@ invalid variable; fix them in `.env`. Nothing starts with bad config.
 flag; `drizzle.config.ts` loads `.env` itself via `process.loadEnvFile`. Confirm the
 file exists and the variable is set.
 
+**The server connects to the wrong database, or `/health` returns 503 with
+`database "…" does not exist`.** Node's `--env-file` does **not** override variables
+that are already set in the environment, so an exported `DATABASE_URL` silently wins
+over `.env` — and nothing warns you. Check with `echo $DATABASE_URL`, and start the
+server in a clean environment if something stale is exported:
+
+```bash
+env -u DATABASE_URL pnpm dev
+```
+
+This is easy to hit after running a one-off command with an inline
+`DATABASE_URL=… pnpm …` in a shell you keep using.
+
 **Rate limited in development.** The limit is 1000/min in development, 120/min in
 production. `/health` is exempt.
