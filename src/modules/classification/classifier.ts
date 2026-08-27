@@ -1,0 +1,165 @@
+import type { AgentCategoryAssignment } from '../agents/agent.types.js';
+import {
+  CATEGORY_RULES,
+  CLASSIFIER_VERSION,
+  CONFIDENCE_SATURATION,
+  PRIMARY_THRESHOLD,
+  SECONDARY_THRESHOLD,
+  SIGNAL_WEIGHTS,
+  type CategoryRule,
+} from './taxonomy.js';
+
+/**
+ * Assigns marketplace categories to an agent, with the evidence for each.
+ *
+ * Deliberately a deterministic rule engine, not a model call. Three reasons:
+ * the same agent must classify identically on every sync so the marketplace does
+ * not reshuffle between page loads; every assignment has to be explainable in the
+ * UI ("matched capability: rebalance"); and an LLM adds latency plus per-agent
+ * cost to what is fundamentally a keyword decision. §22 of the brief makes the
+ * same point — do not spend a model call on a deterministic filter.
+ *
+ * An optional model-assisted pass for genuinely ambiguous agents plugs in behind
+ * `integrations/ai/provider.ts`; it is not wired up because the rules cover the
+ * four launch categories and unresolved cases are visibly `uncategorized` rather
+ * than silently wrong.
+ */
+
+export interface ClassificationInput {
+  name: string;
+  description: string | null;
+  capabilities: string[];
+}
+
+interface Scored {
+  rule: CategoryRule;
+  score: number;
+  signals: string[];
+}
+
+/** Escapes a term so it can sit inside a RegExp literal safely. */
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Word-boundary containment test.
+ *
+ * Prevents the classic false positive where `grid` matches `gridlock` or `lp`
+ * matches `help`. Terms ending in a partial stem (`rebalanc`, `deleverag`) are
+ * intentionally left open at the end so they catch every inflection.
+ */
+function containsTerm(haystack: string, term: string): boolean {
+  const escaped = escapeRegExp(term);
+  // Only anchor the trailing boundary when the term looks like a whole word;
+  // stems such as "rebalanc" must still match "rebalancing".
+  const pattern = new RegExp(`(^|[^a-z0-9])${escaped}`, 'i');
+  return pattern.test(haystack);
+}
+
+function normalizeCapability(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, '-');
+}
+
+function scoreRule(rule: CategoryRule, text: string, capabilities: string[]): Scored {
+  let score = 0;
+  const signals: string[] = [];
+
+  for (const term of rule.capabilityTerms) {
+    const normalizedTerm = normalizeCapability(term);
+    const hit = capabilities.some(
+      (capability) => capability === normalizedTerm || capability.includes(normalizedTerm),
+    );
+    if (hit) {
+      score += SIGNAL_WEIGHTS.capability;
+      signals.push(`capability:${term}`);
+    }
+  }
+
+  for (const phrase of rule.phrases) {
+    if (text.includes(phrase)) {
+      score += SIGNAL_WEIGHTS.phrase;
+      signals.push(`phrase:${phrase}`);
+    }
+  }
+
+  for (const keyword of rule.keywords) {
+    if (containsTerm(text, keyword)) {
+      score += SIGNAL_WEIGHTS.keyword;
+      signals.push(`keyword:${keyword}`);
+    }
+  }
+
+  for (const counter of rule.counterKeywords) {
+    if (text.includes(counter)) {
+      score += SIGNAL_WEIGHTS.counter;
+      signals.push(`excluded:${counter}`);
+    }
+  }
+
+  return { rule, score: Math.max(0, score), signals };
+}
+
+function toConfidence(score: number): number {
+  const ratio = score / CONFIDENCE_SATURATION;
+  // Two decimals: the underlying signal is a weighted keyword count, and more
+  // precision than this would imply a measurement we do not have.
+  return Math.round(Math.min(1, Math.max(0, ratio)) * 100) / 100;
+}
+
+/**
+ * Returns every matching category, primary first.
+ *
+ * Always returns at least one assignment: an agent nothing matches is explicitly
+ * `uncategorized` with a `no-signal-match` reason, which keeps it discoverable
+ * and makes gaps in the taxonomy visible instead of dropping the agent.
+ */
+export function classifyAgent(input: ClassificationInput): AgentCategoryAssignment[] {
+  const text = [input.name, input.description ?? '']
+    .join(' \n ')
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+  const capabilities = input.capabilities.map(normalizeCapability).filter((c) => c.length > 0);
+
+  const scored = CATEGORY_RULES.map((rule) => scoreRule(rule, text, capabilities))
+    .filter((entry) => entry.score > 0)
+    // Ties broken by the taxonomy's declaration order so output is stable.
+    .sort((a, b) => b.score - a.score);
+
+  const [best] = scored;
+
+  if (!best || best.score < PRIMARY_THRESHOLD) {
+    return [
+      {
+        category: 'uncategorized',
+        confidence: 0,
+        isPrimary: true,
+        signals: best ? [`weak-signal:${best.rule.category}`] : ['no-signal-match'],
+        classifierVersion: CLASSIFIER_VERSION,
+      },
+    ];
+  }
+
+  const assignments: AgentCategoryAssignment[] = [
+    {
+      category: best.rule.category,
+      confidence: toConfidence(best.score),
+      isPrimary: true,
+      signals: best.signals,
+      classifierVersion: CLASSIFIER_VERSION,
+    },
+  ];
+
+  for (const entry of scored.slice(1)) {
+    if (entry.score < SECONDARY_THRESHOLD) continue;
+    assignments.push({
+      category: entry.rule.category,
+      confidence: toConfidence(entry.score),
+      isPrimary: false,
+      signals: entry.signals,
+      classifierVersion: CLASSIFIER_VERSION,
+    });
+  }
+
+  return assignments;
+}

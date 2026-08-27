@@ -1,0 +1,190 @@
+import { randomUUID } from 'node:crypto';
+import cors from '@fastify/cors';
+import helmet from '@fastify/helmet';
+import rateLimit from '@fastify/rate-limit';
+import swagger from '@fastify/swagger';
+import swaggerUi from '@fastify/swagger-ui';
+import Fastify from 'fastify';
+import type { Logger } from 'pino';
+import {
+  serializerCompiler,
+  validatorCompiler,
+  jsonSchemaTransform,
+  type ZodTypeProvider,
+} from 'fastify-type-provider-zod';
+import type { Env } from '../config/env.js';
+import type { AppInstance } from './app-instance.js';
+import { createDatabase, type DatabaseHandle } from '../infrastructure/database/client.js';
+import { createAiProvider } from '../integrations/ai/provider.js';
+import { createChainReader } from '../integrations/erc8004/chain-reader.js';
+import { createExplorerClient } from '../integrations/erc8004/explorer-client.js';
+import { createAgentRepository } from '../modules/agents/agent.repository.js';
+import { createAgentService, type AgentService } from '../modules/agents/agent.service.js';
+import { agentRoutes } from '../modules/agents/agent.routes.js';
+import { createCategoryRepository } from '../modules/categories/category.repository.js';
+import { createCategoryService, type CategoryService } from '../modules/categories/category.service.js';
+import { categoryRoutes } from '../modules/categories/category.routes.js';
+import { createReputationRepository } from '../modules/reputation/reputation.repository.js';
+import {
+  createReputationService,
+  type ReputationService,
+} from '../modules/reputation/reputation.service.js';
+import { reputationRoutes } from '../modules/reputation/reputation.routes.js';
+import { createSearchService, type SearchService } from '../modules/search/search.service.js';
+import { searchRoutes } from '../modules/search/search.routes.js';
+import { healthRoutes } from './health.routes.js';
+import { registerErrorHandler } from './error-handler.js';
+
+const API_PREFIX = '/api/v1';
+const APP_VERSION = '0.1.0';
+
+/** The service registry every route plugin reads from. */
+export interface AppServices {
+  agents: AgentService;
+  categories: CategoryService;
+  reputation: ReputationService;
+  search: SearchService;
+}
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    database: DatabaseHandle;
+    services: AppServices;
+    appVersion: string;
+  }
+}
+
+export interface BuildServerOptions {
+  env: Env;
+  /** Shared with the domain services, which log through the same instance. */
+  logger: Logger;
+  /** Injectable so tests can supply a throwaway database. */
+  database?: DatabaseHandle;
+}
+
+/**
+ * Composes the Fastify application.
+ *
+ * Wiring happens here and only here — modules receive their dependencies as
+ * arguments and never reach for a global. That is what makes the API testable
+ * against a real database without starting a process.
+ */
+export async function buildServer({
+  env,
+  logger,
+  database,
+}: BuildServerOptions): Promise<AppInstance> {
+  const app = Fastify({
+    // Fastify's own request logging already emits the request id, method, url,
+    // status and responseTime, so there is no custom logging hook here.
+    loggerInstance: logger,
+    // Trust an upstream proxy's X-Forwarded-* so rate limiting buckets by the
+    // real client IP rather than the load balancer's.
+    trustProxy: true,
+    // Reuse an inbound request id when present so logs correlate across services.
+    genReqId: (request) => {
+      const header = request.headers['x-request-id'];
+      if (typeof header === 'string' && header.length > 0 && header.length <= 200) return header;
+      return randomUUID();
+    },
+    bodyLimit: 256 * 1024,
+  }).withTypeProvider<ZodTypeProvider>();
+
+  app.setValidatorCompiler(validatorCompiler);
+  app.setSerializerCompiler(serializerCompiler);
+
+  app.decorate('appVersion', APP_VERSION);
+  app.decorate('database', database ?? createDatabase(env));
+
+  /*
+   * Composition root. Every dependency is constructed here and injected; no
+   * module reaches for a global, which is what makes them testable in isolation
+   * and keeps the dependency direction visible in one place.
+   */
+  const db = app.database.db;
+  const agentRepository = createAgentRepository(db);
+  const chainReader = createChainReader({ env, logger });
+  const explorer = createExplorerClient(env, logger);
+
+  app.decorate('services', {
+    agents: createAgentService(agentRepository),
+    categories: createCategoryService(createCategoryRepository(db)),
+    reputation: createReputationService({
+      repository: createReputationRepository(db),
+      source: chainReader,
+      explorer,
+      logger,
+    }),
+    search: createSearchService({
+      repository: agentRepository,
+      ai: createAiProvider(env),
+      logger,
+    }),
+  } satisfies AppServices);
+
+  await app.register(helmet, {
+    // The API serves JSON to a separate origin; CSP here would only constrain
+    // the Swagger UI, which sets its own.
+    contentSecurityPolicy: false,
+  });
+
+  await app.register(cors, {
+    origin: env.CORS_ORIGINS,
+    credentials: true,
+    methods: ['GET', 'POST', 'OPTIONS'],
+  });
+
+  await app.register(rateLimit, {
+    max: env.NODE_ENV === 'production' ? 120 : 1_000,
+    timeWindow: '1 minute',
+    // Without this an unauthenticated public API is trivially exhaustible; the
+    // upstream RPC and IPFS quotas it fronts are the real resource being protected.
+    keyGenerator: (request) => request.ip,
+  });
+
+  app.addHook('onSend', (request, reply, payload, done) => {
+    // Lets a client quote the id from a failed call straight back to us.
+    void reply.header('x-request-id', request.id);
+    done(null, payload);
+  });
+
+  await app.register(swagger, {
+    openapi: {
+      info: {
+        title: 'KATTEGAT API',
+        version: APP_VERSION,
+        description:
+          'Discovery, evaluation and trust layer for autonomous agents on BNB Smart Chain.\n\n' +
+          'Agent identity, ownership and reputation are read from the ERC-8004 registries on ' +
+          'BNB Smart Chain. Marketplace categories are derived by KATTEGAT — ERC-8004 itself ' +
+          'carries no category field — and every classification ships the signals that produced it.',
+      },
+      servers: [{ url: `http://${env.HOST}:${String(env.PORT)}`, description: 'local' }],
+      tags: [
+        { name: 'agents', description: 'Agent discovery and detail' },
+        { name: 'categories', description: 'Marketplace taxonomy' },
+        { name: 'reputation', description: 'Live on-chain reputation reads' },
+        { name: 'search', description: 'Natural-language agent search' },
+        { name: 'system', description: 'Health and diagnostics' },
+      ],
+    },
+    transform: jsonSchemaTransform,
+  });
+
+  await app.register(swaggerUi, { routePrefix: '/docs' });
+
+  registerErrorHandler(app);
+
+  await app.register(healthRoutes);
+  // One prefix, registered once per domain module.
+  await app.register(agentRoutes, { prefix: API_PREFIX });
+  await app.register(categoryRoutes, { prefix: API_PREFIX });
+  await app.register(reputationRoutes, { prefix: API_PREFIX });
+  await app.register(searchRoutes, { prefix: API_PREFIX });
+
+  app.addHook('onClose', async () => {
+    await app.database.close();
+  });
+
+  return app;
+}

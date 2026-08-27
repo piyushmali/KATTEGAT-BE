@@ -1,0 +1,332 @@
+import {
+  and,
+  arrayContains,
+  asc,
+  count,
+  desc,
+  eq,
+  gte,
+  ilike,
+  inArray,
+  or,
+  sql,
+} from 'drizzle-orm';
+import type { Database } from '../../infrastructure/database/client.js';
+import {
+  agentCategories,
+  agentReputation,
+  agents,
+  type NewAgentRow,
+} from '../../infrastructure/database/schema.js';
+import type {
+  AgentCategory,
+  AgentCategoryAssignment,
+  AgentSummary,
+  ProtocolTag,
+} from './agent.types.js';
+
+/**
+ * All SQL for the agents domain lives here.
+ *
+ * Services compose behaviour; this file owns persistence. Keeping the boundary
+ * strict is what lets the ingestion pipeline and the API share exactly one
+ * definition of how an agent is written and read.
+ */
+
+export type AgentSortField = 'registered_at' | 'reputation' | 'name' | 'feedback';
+
+export interface ListAgentsFilters {
+  category?: AgentCategory;
+  protocolTag?: ProtocolTag;
+  /** Free-text match over name and description. */
+  query?: string;
+  /** Only agents whose registration file resolved. */
+  resolvedOnly?: boolean;
+  /** Minimum classification confidence, applied with `category`. */
+  minConfidence?: number;
+  traits?: string[];
+}
+
+export interface ListAgentsOptions {
+  filters: ListAgentsFilters;
+  sort: AgentSortField;
+  direction: 'asc' | 'desc';
+  page: number;
+  perPage: number;
+}
+
+export interface ListAgentsResult {
+  agents: AgentSummary[];
+  total: number;
+}
+
+export interface AgentWritePayload {
+  agent: NewAgentRow;
+  categories: AgentCategoryAssignment[];
+  reputation: {
+    feedbackCount: number;
+    clientCount: number;
+    summaryValue: number | null;
+    summaryDecimals: number | null;
+    source: string;
+  } | null;
+}
+
+export interface AgentRepository {
+  list(options: ListAgentsOptions): Promise<ListAgentsResult>;
+  findById(id: string): Promise<AgentSummary | null>;
+  upsertMany(payloads: AgentWritePayload[]): Promise<number>;
+}
+
+/* -------------------------------------------------------------------------- */
+
+type AgentRowShape = typeof agents.$inferSelect;
+type ReputationRowShape = typeof agentReputation.$inferSelect;
+
+function toSummary(
+  row: AgentRowShape,
+  reputationRow: ReputationRowShape | null,
+  categoryRows: (typeof agentCategories.$inferSelect)[],
+): AgentSummary {
+  const summaryValue = reputationRow?.summaryValue ?? null;
+  const summaryDecimals = reputationRow?.summaryDecimals ?? null;
+
+  return {
+    identity: {
+      id: row.id,
+      chainId: row.chainId,
+      agentId: row.agentId,
+      ownerAddress: row.ownerAddress,
+      walletAddress: row.walletAddress,
+      agentUri: row.agentUri,
+      registeredAtBlock: row.registeredAtBlock,
+      registeredAt: row.registeredAt,
+    },
+    profile: {
+      name: row.name,
+      description: row.description,
+      capabilities: row.capabilities,
+      protocolTag: row.protocolTag as ProtocolTag,
+      traitTags: row.traitTags,
+      metadataResolvedAt: row.metadataResolvedAt,
+    },
+    categories: categoryRows
+      .map((categoryRow) => ({
+        category: categoryRow.category as AgentCategory,
+        confidence: categoryRow.confidence,
+        isPrimary: categoryRow.isPrimary,
+        signals: categoryRow.signals,
+        classifierVersion: categoryRow.classifierVersion,
+      }))
+      // Primary first, then strongest confidence — stable ordering for the UI.
+      .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || b.confidence - a.confidence),
+    reputation: reputationRow
+      ? {
+          feedbackCount: reputationRow.feedbackCount,
+          clientCount: reputationRow.clientCount,
+          summaryValue,
+          summaryDecimals,
+          score:
+            summaryValue !== null && summaryDecimals !== null
+              ? summaryValue / 10 ** summaryDecimals
+              : null,
+          source: reputationRow.source,
+          computedAt: reputationRow.computedAt,
+        }
+      : null,
+  };
+}
+
+export function createAgentRepository(db: Database): AgentRepository {
+  /** Builds the shared WHERE clause for list and count so they cannot diverge. */
+  function buildWhere(filters: ListAgentsFilters) {
+    const conditions = [];
+
+    if (filters.protocolTag) {
+      conditions.push(eq(agents.protocolTag, filters.protocolTag));
+    }
+
+    if (filters.resolvedOnly === true) {
+      conditions.push(sql`${agents.metadataResolvedAt} is not null`);
+    }
+
+    if (filters.query) {
+      const term = `%${filters.query}%`;
+      conditions.push(or(ilike(agents.name, term), ilike(agents.description, term)));
+    }
+
+    if (filters.traits && filters.traits.length > 0) {
+      // AND semantics via array containment. Drizzle's helper is used rather than
+      // a raw `@>` because a hand-written one binds the JS array without a
+      // `::text[]` cast, which Postgres silently matches against nothing.
+      conditions.push(arrayContains(agents.traitTags, filters.traits));
+    }
+
+    if (filters.category) {
+      const categoryConditions = [eq(agentCategories.category, filters.category)];
+      if (filters.minConfidence !== undefined) {
+        categoryConditions.push(gte(agentCategories.confidence, filters.minConfidence));
+      }
+      conditions.push(
+        sql`exists (select 1 from ${agentCategories} where ${and(
+          eq(agentCategories.agentId, agents.id),
+          ...categoryConditions,
+        )})`,
+      );
+    }
+
+    return conditions.length > 0 ? and(...conditions) : undefined;
+  }
+
+  function orderBy(sort: AgentSortField, direction: 'asc' | 'desc') {
+    const dir = direction === 'asc' ? asc : desc;
+
+    switch (sort) {
+      case 'name':
+        return [dir(agents.name)];
+      case 'feedback':
+        // NULLS LAST both ways: an agent with no feedback should never outrank one
+        // that has some just because the column is null.
+        return [sql`${agentReputation.feedbackCount} ${sql.raw(direction)} nulls last`];
+      case 'reputation':
+        return [
+          sql`(${agentReputation.summaryValue}::numeric / power(10, coalesce(${agentReputation.summaryDecimals}, 0))) ${sql.raw(direction)} nulls last`,
+        ];
+      case 'registered_at':
+      default:
+        return [sql`${agents.registeredAt} ${sql.raw(direction)} nulls last`];
+    }
+  }
+
+  return {
+    async list(options: ListAgentsOptions): Promise<ListAgentsResult> {
+      const where = buildWhere(options.filters);
+      const offset = (options.page - 1) * options.perPage;
+
+      const rows = await db
+        .select({ agent: agents, reputation: agentReputation })
+        .from(agents)
+        .leftJoin(agentReputation, eq(agentReputation.agentId, agents.id))
+        .where(where)
+        .orderBy(...orderBy(options.sort, options.direction))
+        .limit(options.perPage)
+        .offset(offset);
+
+      const [totalRow] = await db
+        .select({ value: count() })
+        .from(agents)
+        .leftJoin(agentReputation, eq(agentReputation.agentId, agents.id))
+        .where(where);
+
+      if (rows.length === 0) {
+        return { agents: [], total: totalRow?.value ?? 0 };
+      }
+
+      // One extra query for categories rather than N — the join would multiply
+      // agent rows and force de-duplication in JS.
+      const ids = rows.map((row) => row.agent.id);
+      const categoryRows = await db
+        .select()
+        .from(agentCategories)
+        .where(inArray(agentCategories.agentId, ids));
+
+      const byAgent = new Map<string, (typeof agentCategories.$inferSelect)[]>();
+      for (const categoryRow of categoryRows) {
+        const bucket = byAgent.get(categoryRow.agentId);
+        if (bucket) bucket.push(categoryRow);
+        else byAgent.set(categoryRow.agentId, [categoryRow]);
+      }
+
+      return {
+        agents: rows.map((row) =>
+          toSummary(row.agent, row.reputation, byAgent.get(row.agent.id) ?? []),
+        ),
+        total: totalRow?.value ?? 0,
+      };
+    },
+
+    async findById(id: string): Promise<AgentSummary | null> {
+      const [row] = await db
+        .select({ agent: agents, reputation: agentReputation })
+        .from(agents)
+        .leftJoin(agentReputation, eq(agentReputation.agentId, agents.id))
+        .where(eq(agents.id, id))
+        .limit(1);
+
+      if (!row) return null;
+
+      const categoryRows = await db
+        .select()
+        .from(agentCategories)
+        .where(eq(agentCategories.agentId, id));
+
+      return toSummary(row.agent, row.reputation, categoryRows);
+    },
+
+    /**
+     * Idempotent write for the sync pipeline.
+     *
+     * Runs in one transaction per batch so a partially-written agent is never
+     * visible: an agent row without its categories would show up in the
+     * marketplace as uncategorised and quietly skew every category count.
+     */
+    async upsertMany(payloads: AgentWritePayload[]): Promise<number> {
+      if (payloads.length === 0) return 0;
+
+      await db.transaction(async (tx) => {
+        for (const payload of payloads) {
+          await tx
+            .insert(agents)
+            .values(payload.agent)
+            .onConflictDoUpdate({
+              target: agents.id,
+              set: {
+                ownerAddress: payload.agent.ownerAddress,
+                walletAddress: payload.agent.walletAddress ?? null,
+                agentUri: payload.agent.agentUri ?? null,
+                name: payload.agent.name,
+                description: payload.agent.description ?? null,
+                protocolTag: payload.agent.protocolTag ?? 'unconfigured',
+                traitTags: payload.agent.traitTags ?? [],
+                capabilities: payload.agent.capabilities ?? [],
+                rawMetadata: payload.agent.rawMetadata ?? null,
+                metadataResolvedAt: payload.agent.metadataResolvedAt ?? null,
+                lastSyncedAt: new Date(),
+                updatedAt: new Date(),
+              },
+            });
+
+          // Replace rather than merge: the classifier is deterministic, so its
+          // current output is the whole truth. Merging would strand categories
+          // from an older taxonomy version on the record forever.
+          await tx.delete(agentCategories).where(eq(agentCategories.agentId, payload.agent.id));
+
+          if (payload.categories.length > 0) {
+            await tx.insert(agentCategories).values(
+              payload.categories.map((assignment) => ({
+                agentId: payload.agent.id,
+                category: assignment.category,
+                confidence: assignment.confidence,
+                isPrimary: assignment.isPrimary,
+                signals: assignment.signals,
+                classifierVersion: assignment.classifierVersion,
+              })),
+            );
+          }
+
+          if (payload.reputation) {
+            await tx
+              .insert(agentReputation)
+              .values({ agentId: payload.agent.id, ...payload.reputation })
+              .onConflictDoUpdate({
+                target: agentReputation.agentId,
+                set: { ...payload.reputation, computedAt: new Date() },
+              });
+          }
+        }
+      });
+
+      return payloads.length;
+    },
+  };
+}
