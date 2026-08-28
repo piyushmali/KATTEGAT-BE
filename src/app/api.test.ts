@@ -83,7 +83,7 @@ beforeAll(async () => {
       confidence: 0.8,
       isPrimary: true,
       signals: ['capability:rebalance'],
-      classifierVersion: 'rules-v1',
+      classifierVersion: 'rules-v2',
     },
     {
       agentId: YIELD_AGENT,
@@ -91,7 +91,7 @@ beforeAll(async () => {
       confidence: 0.6,
       isPrimary: true,
       signals: ['keyword:apy'],
-      classifierVersion: 'rules-v1',
+      classifierVersion: 'rules-v2',
     },
   ]);
 

@@ -119,7 +119,7 @@ describe('classifyAgent', () => {
 
     for (const assignment of result) {
       expect(assignment.signals.length).toBeGreaterThan(0);
-      expect(assignment.classifierVersion).toBe('rules-v1');
+      expect(assignment.classifierVersion).toBe('rules-v2');
     }
   });
 
@@ -164,7 +164,17 @@ describe('classifyAgent', () => {
   it('does not read energy/smart_grids as a grid-trading capability', () => {
     const result = classifyAgent(agent('8004AI', '8004AI8004AI8004AI', OASF_CAPABILITIES));
 
-    expect(result[0]?.category).toBe('uncategorized');
+    /*
+     * The invariant is "not grid-trading", not "uncategorized".
+     *
+     * This originally asserted `uncategorized`, which was correct only while the
+     * taxonomy had four DeFi categories. The list above also declares
+     * `marketing_and_advertising/market_research` and
+     * `agent_orchestration/agent_coordination`, so under the wider taxonomy this
+     * agent legitimately reads as research + automation. That is a true statement
+     * about its declared capabilities; `energy/smart_grids` meaning grid trading
+     * was not.
+     */
     expect(result.map((entry) => entry.category)).not.toContain('grid-trading');
   });
 

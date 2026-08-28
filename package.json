@@ -22,6 +22,7 @@
     "db:migrate": "tsx --env-file-if-exists=.env src/infrastructure/database/migrate.ts",
     "db:studio": "drizzle-kit studio",
     "sync:agents": "tsx --env-file-if-exists=.env src/modules/ingestion/sync.cli.ts",
+    "reclassify": "tsx --env-file-if-exists=.env src/modules/classification/reclassify.cli.ts",
     "verify:chain": "tsx --env-file-if-exists=.env scripts/verify-chain.ts"
   },
   "pnpm": {

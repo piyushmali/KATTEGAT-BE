@@ -32,6 +32,8 @@ import {
 import { reputationRoutes } from '../modules/reputation/reputation.routes.js';
 import { createSearchService, type SearchService } from '../modules/search/search.service.js';
 import { searchRoutes } from '../modules/search/search.routes.js';
+import { createStatsService, type StatsService } from '../modules/stats/stats.service.js';
+import { statsRoutes } from '../modules/stats/stats.routes.js';
 import { healthRoutes } from './health.routes.js';
 import { registerErrorHandler } from './error-handler.js';
 
@@ -44,6 +46,7 @@ export interface AppServices {
   categories: CategoryService;
   reputation: ReputationService;
   search: SearchService;
+  stats: StatsService;
 }
 
 declare module 'fastify' {
@@ -120,6 +123,7 @@ export async function buildServer({
       ai: createAiProvider(env),
       logger,
     }),
+    stats: createStatsService(db),
   } satisfies AppServices);
 
   await app.register(helmet, {
@@ -181,6 +185,7 @@ export async function buildServer({
   await app.register(categoryRoutes, { prefix: API_PREFIX });
   await app.register(reputationRoutes, { prefix: API_PREFIX });
   await app.register(searchRoutes, { prefix: API_PREFIX });
+  await app.register(statsRoutes, { prefix: API_PREFIX });
 
   app.addHook('onClose', async () => {
     await app.database.close();

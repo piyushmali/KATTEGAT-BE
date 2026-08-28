@@ -8,10 +8,34 @@
  * change here, and nothing can silently disagree about what the valid values are.
  */
 export const AGENT_CATEGORIES = [
+  /*
+   * The four BNB Agent Studio launch categories. Declared first, and that order is
+   * load-bearing: the classifier breaks a score tie toward the earlier rule, so a
+   * grid-trading agent can never be absorbed by the broader `trading-execution`
+   * bucket below.
+   */
   'rebalancing',
   'grid-trading',
   'yield-optimization',
   'health-factor-monitoring',
+
+  /*
+   * Categories added after measuring what is actually registered on BNB Smart
+   * Chain. Indexing ~19k agents showed the four DeFi categories match well under
+   * 1% of them, while thousands of trading, research, automation, security, code
+   * and content agents were being dumped into `uncategorized`.
+   *
+   * These are derived by exactly the same deterministic rules as the launch four —
+   * no invented data, and every assignment still ships its signals. See
+   * docs/decisions.md for the measurements behind each one.
+   */
+  'trading-execution',
+  'research-analytics',
+  'automation-operations',
+  'security-verification',
+  'code-smart-contracts',
+  'content-media',
+
   /** Indexed but not confidently placed. Deliberately visible, never hidden. */
   'uncategorized',
 ] as const;
@@ -183,6 +207,194 @@ export const CATEGORY_RULES: readonly CategoryRule[] = [
     keywords: ['liquidation', 'collateral', 'borrow', 'lending', 'ltv', 'debt', 'leverage'],
     counterKeywords: [],
   },
+
+  /* ------------------------------------------------------------------------ *
+   * Ecosystem categories.
+   *
+   * Everything below was added because the registry demanded it, not to fill out
+   * a grid. These rules are deliberately broader than the four above, so they sit
+   * later in the list and lose every score tie to a more specific DeFi match.
+   * ------------------------------------------------------------------------ */
+
+  {
+    category: 'trading-execution',
+    label: 'Trading & Execution',
+    description:
+      'Analyses markets and executes trades. The broad trading bucket — agents running a specific strategy are classified under that strategy instead.',
+    capabilityTerms: [
+      'trading',
+      'trade-execution',
+      'order-execution',
+      'market-analysis',
+      'technical-analysis',
+      'arbitrage',
+      'perpetuals',
+      'derivatives',
+    ],
+    phrases: [
+      'trade execution',
+      'execute trades',
+      'trading strateg',
+      'trading signal',
+      'market analysis',
+      'technical analysis',
+      'price action',
+      'entry and exit',
+      'arbitrage opportunit',
+      'multi-chain trading',
+      'automated trading',
+    ],
+    keywords: ['trading', 'trader', 'arbitrage', 'perp', 'swap', 'execution'],
+    // A newsletter about trading is not a trading agent.
+    counterKeywords: ['newsletter', 'educational only', 'course'],
+  },
+
+  {
+    category: 'research-analytics',
+    label: 'Research & Analytics',
+    description:
+      'Gathers, analyses and explains data — protocol research, on-chain analytics and structured insight rather than execution.',
+    capabilityTerms: [
+      'research',
+      'analytics',
+      'data-analysis',
+      'market-research',
+      'due-diligence',
+      'reporting',
+      'data-science',
+    ],
+    phrases: [
+      'data analysis',
+      'market research',
+      'protocol research',
+      'on-chain analytics',
+      'structured data analysis',
+      'actionable insight',
+      'due diligence',
+      'research agent',
+      'analytics agent',
+    ],
+    keywords: ['research', 'analytics', 'insight', 'dataset', 'intelligence'],
+    counterKeywords: [],
+  },
+
+  {
+    category: 'automation-operations',
+    label: 'Automation & Ops',
+    description:
+      'Runs workflows, orchestrates other agents and keeps operational processes moving without a human in the loop.',
+    capabilityTerms: [
+      'automation',
+      'orchestration',
+      'workflow',
+      'agent-coordination',
+      'devops',
+      'scheduling',
+      'monitoring',
+      'alerting',
+    ],
+    phrases: [
+      'workflow automation',
+      'automation & ops',
+      'automation and ops',
+      'task automation',
+      'agent orchestration',
+      'multi agent',
+      'multi-agent',
+      'operational process',
+      'ops agent',
+      'uptime monitoring',
+    ],
+    keywords: ['automation', 'orchestrat', 'workflow', 'scheduler', 'pipeline'],
+    counterKeywords: [],
+  },
+
+  {
+    category: 'security-verification',
+    label: 'Security & Verification',
+    description:
+      'Audits contracts, verifies claims and looks for vulnerabilities — the agents other agents get checked by.',
+    capabilityTerms: [
+      'security',
+      'audit',
+      'verification',
+      'vulnerability-detection',
+      'threat-detection',
+      'formal-verification',
+      'penetration-testing',
+    ],
+    phrases: [
+      'security review',
+      'smart contract security',
+      'security audit',
+      'vulnerability detection',
+      'bug detection',
+      'threat detection',
+      'formal verification',
+      'gas optimization',
+      'exploit detection',
+    ],
+    keywords: ['security', 'audit', 'vulnerabilit', 'exploit', 'attack', 'verification'],
+    counterKeywords: [],
+  },
+
+  {
+    category: 'code-smart-contracts',
+    label: 'Code & Smart Contracts',
+    description:
+      'Writes, reviews and debugs software — including Solidity and the tooling around deploying it.',
+    capabilityTerms: [
+      'coding',
+      'code-generation',
+      'code-review',
+      'smart-contracts',
+      'solidity',
+      'debugging',
+      'text-to-code',
+      'software-engineering',
+    ],
+    phrases: [
+      'smart contract',
+      'code review',
+      'code generation',
+      'write code',
+      'debugging',
+      'memory leak',
+      'root cause',
+      'software engineering',
+      'developer tool',
+    ],
+    keywords: ['solidity', 'coding', 'developer', 'debug', 'compile', 'refactor'],
+    counterKeywords: [],
+  },
+
+  {
+    category: 'content-media',
+    label: 'Content & Media',
+    description:
+      'Produces writing, social posts and other media — the creative end of the agent ecosystem.',
+    capabilityTerms: [
+      'content-generation',
+      'writing',
+      'copywriting',
+      'social-media',
+      'translation',
+      'summarization',
+      'publishing',
+    ],
+    phrases: [
+      'content creation',
+      'content generation',
+      'writing & content',
+      'writing and content',
+      'social media',
+      'copywrit',
+      'blog post',
+      'summariz',
+    ],
+    keywords: ['content', 'writing', 'copywriter', 'translation', 'influencer'],
+    counterKeywords: [],
+  },
 ];
 
 /** Weight per evidence class. Capability claims outrank prose. */
@@ -205,4 +417,13 @@ export const PRIMARY_THRESHOLD = 2;
 /** Minimum score for a secondary category. */
 export const SECONDARY_THRESHOLD = 2;
 
-export const CLASSIFIER_VERSION = 'rules-v1';
+/**
+ * Stored on every assignment so a row's category can be traced to the ruleset that
+ * produced it.
+ *
+ * v2 widened the taxonomy from the four BNB Agent Studio categories to ten, after
+ * indexing ~19k agents showed the original four matched under 1% of the registry.
+ * Bumped rather than left alone because a `rules-v1` row and a `rules-v2` row are
+ * genuinely different claims.
+ */
+export const CLASSIFIER_VERSION = 'rules-v2';

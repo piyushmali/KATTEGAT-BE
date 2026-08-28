@@ -153,31 +153,57 @@ through SQL.
 
 ---
 
-## 11. The four launch categories match the target, not today's chain data
+## 11. The taxonomy was widened from four categories to ten
 
-**Observation, not a decision, and it needs a product call.**
+**Decision.** `AGENT_CATEGORIES` now holds ten categories: the four BNB Agent Studio
+launch categories plus `trading-execution`, `research-analytics`,
+`automation-operations`, `security-verification`, `code-smart-contracts` and
+`content-media`.
 
-All 243 agents indexed from a live BSC window classify as `uncategorized`, and that is
-correct. Recent registrations are dominated by TermiX bulk registrations with six
-templated descriptions — "code & smart contracts", "automation & ops", "security &
-verification", "data & research", "market & protocol research", "writing & content" —
-plus EvoEvo agents. The four hackathon DeFi categories are essentially absent from
-recent on-chain data.
+**Why.** Measured, not assumed. Indexing ~19k agents from the registry showed the four
+DeFi categories matching **63 of them** — 0.3%. Everything else fell into
+`uncategorized`, which is technically honest and practically useless: a marketplace
+whose every filter returns nothing is not a marketplace.
 
-The classifier is working; the taxonomy targets the agents Agent Studio will produce,
-not the general-purpose agents currently registered.
+The registry is not mostly DeFi agents. It is mostly trading, research, automation,
+security, code and content agents. Measuring the description corpus before writing any
+rules gave the shape of what is actually there:
 
-**Options, deliberately not taken unilaterally:**
+| Cluster                  | Agents matching |
+| ------------------------ | --------------- |
+| trading / market analysis | ~6,850          |
+| research / analytics      | ~220            |
+| automation / ops          | ~190            |
+| security / audit          | ~130            |
+| code / smart contracts    | ~115            |
+| content / writing         | ~115            |
 
-1. Keep the four categories. Honest, but a demo today shows 100% uncategorized.
-2. Add the categories actually present (code, security, research, automation,
-   content). Makes the marketplace useful now; extending `CATEGORY_RULES` is a
-   data-only change requiring no migration.
-3. Point `BSC_RPC_URL` at an archive provider and index further back, where DeFi
-   agents may exist.
+After reclassification the index went from 63 classified agents to **5,074**, across 8
+populated categories.
 
-Option 2 is the smallest change with the largest demo effect. Not done because it
-expands the product's declared scope, which is the user's call.
+**What this is not.** It is not hardcoded categories to make the UI look populated.
+Every new category is a `CategoryRule` in the same table, scored by the same
+deterministic rules, with the same weights and thresholds, and every assignment still
+ships the signals that produced it. An agent that matches nothing is still
+`uncategorized`.
+
+**Precedence.** The four launch categories are declared *first* in the list, and the
+classifier breaks a score tie toward the earlier rule. So a grid-trading agent cannot
+be absorbed into the broader `trading-execution` bucket. The generic rules also sit
+later and are deliberately broader, which is why they lose ties rather than win them.
+
+**Cost.** None at the schema level — both category columns are plain `text`, so this
+needed no migration. Existing rows were updated by `pnpm reclassify`, which re-runs the
+classifier from stored `raw_metadata` and capabilities without refetching a single
+registration file. That is precisely why ingestion persists the raw document.
+
+`CLASSIFIER_VERSION` moved to `rules-v2`, so a row classified under the four-category
+taxonomy is distinguishable from one classified under ten.
+
+**Still true:** `grid-trading` and `health-factor-monitoring` currently have zero
+agents. The UI keeps them visible but disabled, labelled as awaiting agents, rather
+than hiding them (which would misrepresent the declared scope) or offering them as
+normal filters (which would look broken when clicked).
 
 ---
 
