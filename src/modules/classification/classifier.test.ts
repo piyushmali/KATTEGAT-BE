@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { classifyAgent } from './classifier.js';
-import { CATEGORY_RULES } from './taxonomy.js';
+import { CATEGORY_RULES, CLASSIFIER_VERSION } from './taxonomy.js';
 
 /**
  * The classifier is the one piece of KATTEGAT that invents information rather
@@ -119,7 +119,14 @@ describe('classifyAgent', () => {
 
     for (const assignment of result) {
       expect(assignment.signals.length).toBeGreaterThan(0);
-      expect(assignment.classifierVersion).toBe('rules-v2');
+      /*
+       * Asserted against the exported constant, not a literal. The intent is that every
+       * assignment is stamped with the ruleset that produced it, so a row can be traced
+       * later — pinning the string here only guaranteed a failing test on each bump,
+       * which is a chore rather than a guard. The shape check keeps the value meaningful.
+       */
+      expect(assignment.classifierVersion).toBe(CLASSIFIER_VERSION);
+      expect(assignment.classifierVersion).toMatch(/^rules-v\d+$/);
     }
   });
 
@@ -210,5 +217,96 @@ describe('classifyAgent', () => {
     // "grids" must not satisfy "grid", or the smart_grids bug returns.
     expect(classifyAgent(agent('A', null, ['energy/grids']))[0]?.category).toBe('uncategorized');
     expect(classifyAgent(agent('A', null, ['x/yielding']))[0]?.category).toBe('uncategorized');
+  });
+});
+
+/**
+ * The two v3 rule changes, tested against the exact text that motivated them.
+ *
+ * Both descriptions below are copied verbatim from agents indexed on BNB Smart Chain,
+ * because a rule tuned against invented text proves nothing about the corpus it has to
+ * work on.
+ */
+describe('classifyAgent — v3 corpus findings', () => {
+  const DEBOT = 'Trading agent from debot.ai — trade everything smarter on Debot.';
+  const DGRID =
+    "I'm agent001 from dgrid.ai!I'm currently helping my owner score/vote on AI models at dgrid.ai/arena to earn USDT.";
+
+  it('classifies an agent that calls itself a trading agent', () => {
+    /*
+     * 2,285 indexed agents use this phrasing. They previously scored 1 on the bare
+     * `trading` keyword against a threshold of 2, so the classifier reported
+     * `weak-signal:trading-execution` — an accurate description of an over-strict rule,
+     * not of an ambiguous agent.
+     */
+    const result = classifyAgent({ name: 'gemini', description: DEBOT, capabilities: [] });
+    const primary = result.find((entry) => entry.isPrimary);
+
+    expect(primary?.category).toBe('trading-execution');
+    expect(primary?.signals.join(' ')).toContain('trading agent');
+  });
+
+  it('classifies the AI-model scoring cluster as model evaluation', () => {
+    const result = classifyAgent({ name: 'agent001', description: DGRID, capabilities: [] });
+    const primary = result.find((entry) => entry.isPrimary);
+
+    expect(primary?.category).toBe('model-evaluation');
+  });
+
+  it('NEVER files the dgrid cluster under grid trading', () => {
+    /*
+     * The trap this whole change had to avoid. These descriptions contain the substring
+     * "dgrid", and a `grid` term matched by substring rather than word boundary would
+     * have filed 4,692 model-evaluation agents as Grid Trading — a confident, wrong,
+     * and completely invisible answer.
+     */
+    const result = classifyAgent({ name: 'agent001', description: DGRID, capabilities: [] });
+    expect(result.map((entry) => entry.category)).not.toContain('grid-trading');
+  });
+
+  it('still keeps genuine grid trading separate from the broad trading bucket', () => {
+    // Guards the other direction: widening trading-execution must not swallow a strategy.
+    const result = classifyAgent({
+      name: 'Grid Bot',
+      description: 'Places a ladder of staggered orders across a price range.',
+      capabilities: ['grid-trading'],
+    });
+
+    expect(result.find((entry) => entry.isPrimary)?.category).toBe('grid-trading');
+  });
+
+  it('does not call a trading agent a model evaluator just for mentioning a model', () => {
+    // The counter-keyword earning its place: almost every agent mentions a model.
+    const result = classifyAgent({
+      name: 'quant',
+      description: 'Trading agent powered by a forecasting model.',
+      capabilities: [],
+    });
+
+    expect(result.find((entry) => entry.isPrimary)?.category).toBe('trading-execution');
+  });
+});
+
+describe('classifyAgent — model evaluation stays narrow', () => {
+  it('does not claim a news aggregator that happens to declare a quality-evaluation skill', () => {
+    /*
+     * Regression from the v3 rollout. A bare `evaluation` capability term matched the
+     * OASF skill `evaluation_and_monitoring/quality_evaluation` at capability weight and
+     * outranked this agent's far stronger media signals, filing a Hacker-News-for-agents
+     * as a model evaluator. Its real capabilities are reproduced verbatim.
+     */
+    const result = classifyAgent({
+      name: 'ClawNews',
+      description:
+        'Hacker News for AI agents - built by agents, for agents. ClawNews is the premier news aggregation and community platform where autonomous agents share, discover, and engage with content.',
+      capabilities: [
+        'agent_orchestration/agent_coordination',
+        'evaluation_and_monitoring/quality_evaluation',
+        'media_and_entertainment/news',
+        'natural_language_processing/information_retrieval_synthesis/summarization',
+      ],
+    });
+
+    expect(result.find((entry) => entry.isPrimary)?.category).not.toBe('model-evaluation');
   });
 });
