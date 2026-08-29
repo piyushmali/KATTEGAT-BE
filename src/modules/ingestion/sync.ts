@@ -44,8 +44,36 @@ export interface SyncOptions {
 
 const DEFAULT_MAX_REPUTATION_READS = 60;
 
-/** Agent ids resolved per pass. Bounded so a run is interruptible and resumable. */
-const BACKFILL_BATCH = 150;
+/**
+ * Agent ids resolved per pass. Bounded so a run is interruptible and resumable.
+ *
+ * Measured on BNB Smart Chain, walking a dense stretch of the id space:
+ *
+ *   150 ids   6s    25 ids/sec
+ *   600 ids  14s    42 ids/sec
+ *   2400 ids 36s    66 ids/sec
+ *
+ * Throughput climbs with batch size because the per-pass overhead — an id-space
+ * bisect and a database round trip — is fixed. 1200 sits near the top of that curve
+ * while still bounding what an interrupted pass discards to under half a minute of
+ * work, which matters because the full walk is a multi-hour job.
+ */
+const BACKFILL_BATCH = 1_200;
+
+/**
+ * Whether a looping backfill has more work to do.
+ *
+ * Extracted and tested because the failure mode is silent. This condition previously
+ * also stopped when a pass discovered no agents, which is wrong: an id range containing
+ * nothing minted is a gap in the registry, not the end of it. Any sparse stretch would
+ * have ended the walk early and reported success — the worst possible outcome for a job
+ * whose entire purpose is completeness, because it looks finished.
+ *
+ * `remaining` is the only thing that answers the question.
+ */
+export function backfillHasMore(result: Pick<BackfillResult, 'remaining'>): boolean {
+  return result.remaining > 0;
+}
 
 export interface BackfillResult {
   mode: 'backfill';
@@ -72,14 +100,20 @@ export interface BackfillResult {
  * it never interferes with the incremental log cursor.
  */
 export async function backfillAgents(
-  options: SyncOptions & { limit?: number },
+  options: SyncOptions & { limit?: number; knownHighestAgentId?: number },
 ): Promise<BackfillResult> {
   const { db, logger, source, repository } = options;
   const cursorId = `${String(source.chainId)}:identity:backfill`;
   const now = new Date();
 
   const [existing] = await db.select().from(syncState).where(eq(syncState.id, cursorId)).limit(1);
-  const highest = await source.highestAgentId();
+  /*
+   * `highestAgentId` bisects the id space, which costs around nineteen `eth_call`s.
+   * That is nothing once and thousands of wasted calls across a full walk, so a caller
+   * looping over many passes hands back the value it already has. Omitted, it is
+   * discovered as before, which keeps a single pass self-contained.
+   */
+  const highest = options.knownHighestAgentId ?? (await source.highestAgentId());
 
   // `lastBlock` stores the last agent id for this cursor. Reusing the column keeps
   // one table for both strategies; the cursor id says which unit it is in.

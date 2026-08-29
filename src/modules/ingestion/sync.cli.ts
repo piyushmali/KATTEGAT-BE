@@ -3,7 +3,7 @@ import { createDatabase } from '../../infrastructure/database/client.js';
 import { createLogger } from '../../infrastructure/logging/logger.js';
 import { createChainReader } from '../../integrations/erc8004/chain-reader.js';
 import { createAgentRepository } from '../agents/agent.repository.js';
-import { backfillAgents, syncAgents } from './sync.js';
+import { backfillAgents, backfillHasMore, syncAgents } from './sync.js';
 
 /**
  * Runs one ingestion pass and exits.
@@ -13,6 +13,11 @@ import { backfillAgents, syncAgents } from './sync.js';
  *   pnpm sync:agents --backfill          walk agent ids (reaches the whole registry)
  *   pnpm sync:agents --backfill --limit 500
  *   pnpm sync:agents --backfill --loop   repeat until the registry is exhausted
+ *
+ * `--loop` is a long job — the full registry is ~300k ids at roughly 65 ids/sec — so it
+ * reports progress with an ETA and stops cleanly on SIGINT, finishing the pass in flight
+ * before it saves. Interrupting it is safe at any point: the cursor advances per pass,
+ * so resuming repeats at most one batch.
  *
  * Incremental sync replays logs, which is cheap but bounded by the endpoint's log
  * retention. Backfill walks ids with plain `eth_call`, which has no retention limit
@@ -55,22 +60,100 @@ async function main(): Promise<void> {
       return;
     }
 
-    // One pass, or repeated passes until the registry is exhausted. Each pass
-    // commits its own cursor, so interrupting `--loop` loses at most one batch.
+    /*
+     * One pass, or repeated passes until the registry is exhausted. Each pass commits
+     * its own cursor, so interrupting `--loop` loses at most one batch.
+     */
     let totalPersisted = 0;
+    let totalDiscovered = 0;
     let passes = 0;
+    const startedAt = Date.now();
+
+    /*
+     * Stop at the end of the current pass rather than mid-write.
+     *
+     * A full walk takes hours, so being able to stop it is a requirement, not a
+     * nicety. Killing the process outright would abandon a pass whose agents were
+     * fetched but whose cursor had not been committed — that work is simply redone on
+     * resume, but finishing the pass is free and keeps the log honest about where it
+     * got to.
+     */
+    let stopping = false;
+    const requestStop = () => {
+      if (stopping) return;
+      stopping = true;
+      logger.warn('stop requested — finishing the current pass, then saving progress');
+    };
+    process.once('SIGINT', requestStop);
+    process.once('SIGTERM', requestStop);
+
+    /*
+     * Resolved once and handed to every pass. Each call bisects the id space for about
+     * nineteen `eth_call`s, which across a few hundred passes is thousands of requests
+     * spent re-learning something that barely changes.
+     */
+    const knownHighestAgentId = loop ? await deps.source.highestAgentId() : undefined;
 
     for (;;) {
-      const result = await backfillAgents({ ...deps, ...(limit === undefined ? {} : { limit }) });
+      const result = await backfillAgents({
+        ...deps,
+        ...(limit === undefined ? {} : { limit }),
+        ...(knownHighestAgentId === undefined ? {} : { knownHighestAgentId }),
+      });
       totalPersisted += result.persisted;
+      totalDiscovered += result.discovered;
       passes += 1;
 
-      if (!loop || result.remaining === 0 || result.discovered === 0) {
-        process.stdout.write(
-          `${JSON.stringify({ ...result, passes, totalPersisted }, null, 2)}\n`,
+      /*
+       * `remaining` is the only correct termination condition.
+       *
+       * This previously also stopped on `discovered === 0`, which is wrong: an id range
+       * containing no minted agents is a gap in the registry, not the end of it. Any
+       * sparse stretch would have silently ended the walk early and reported success,
+       * which is the worst possible failure for a job whose whole purpose is
+       * completeness — it looks finished.
+       */
+      const done = !backfillHasMore(result);
+
+      if (loop && !done && !stopping) {
+        /*
+         * Progress and a rate-based estimate, because a multi-hour job that prints
+         * nothing is indistinguishable from one that has hung.
+         *
+         * The rate is measured over the whole run rather than the last pass, so a single
+         * slow batch does not throw the estimate around.
+         */
+        const elapsedSeconds = Math.max(1, (Date.now() - startedAt) / 1000);
+        const idsPerSecond = totalDiscovered / elapsedSeconds;
+
+        logger.info(
+          {
+            passes,
+            cursor: result.toId,
+            remaining: result.remaining,
+            totalPersisted,
+            idsPerSecond: Number(idsPerSecond.toFixed(1)),
+            etaMinutes: Number((result.remaining / Math.max(1, idsPerSecond) / 60).toFixed(1)),
+          },
+          'backfill progress',
         );
-        return;
+        continue;
       }
+
+      process.stdout.write(
+        `${JSON.stringify(
+          {
+            ...result,
+            passes,
+            totalPersisted,
+            stoppedEarly: stopping && !done,
+            elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+          },
+          null,
+          2,
+        )}\n`,
+      );
+      return;
     }
   } finally {
     await handle.close();
