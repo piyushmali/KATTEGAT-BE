@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { Logger } from 'pino';
 import type { Env } from '../../config/env.js';
 import type { Database } from '../../infrastructure/database/client.js';
@@ -103,6 +103,47 @@ export interface MetadataBacklogResult {
  * Writes go through the same `upsertMany` as discovery, so normalisation and
  * classification cannot drift between the two paths.
  */
+/**
+ * Runs `work` only if no other ingestion process holds the lock.
+ *
+ * A Postgres session-level advisory lock, released when the connection closes — including
+ * on a crash — so a killed run cannot leave ingestion permanently locked out.
+ *
+ * This exists because the failure actually happened. Two backfill processes overlapped:
+ * one had been orphaned by a terminal being closed without its child being killed, and it
+ * kept committing an old cursor while a newer run raced ahead. The cursor went
+ * *backwards* — 317,064 down to 154,250 — which loses no data, since the writes are
+ * idempotent upserts, but silently condemns the next run to re-walk 160,000 ids for
+ * nothing.
+ *
+ * The realistic production version of the same bug is a cron entry firing again while the
+ * previous run is still going, which for a job that takes tens of minutes is not an edge
+ * case.
+ */
+export async function withIngestionLock<T>(
+  db: Database,
+  logger: Logger,
+  work: () => Promise<T>,
+): Promise<T | null> {
+  // Arbitrary but fixed: any constant works as long as every ingestion path shares it.
+  const LOCK_KEY = 8_004_056;
+
+  const [acquired] = await db.execute<{ locked: boolean }>(
+    sql`select pg_try_advisory_lock(${LOCK_KEY}) as locked`,
+  );
+
+  if (acquired?.locked !== true) {
+    logger.warn('another ingestion process holds the lock — exiting rather than racing its cursor');
+    return null;
+  }
+
+  try {
+    return await work();
+  } finally {
+    await db.execute(sql`select pg_advisory_unlock(${LOCK_KEY})`);
+  }
+}
+
 export async function resolveMetadataBacklog(
   options: SyncOptions & { limit?: number },
 ): Promise<MetadataBacklogResult> {
