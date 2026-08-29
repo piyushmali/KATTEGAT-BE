@@ -18,6 +18,7 @@ import type {
   DiscoveryPage,
 } from '../agent-source.js';
 import { identityRegistryAbi, reputationRegistryAbi } from './abi.js';
+import { decodeScore } from '../../modules/reputation/score.js';
 import { loadRegistrationFile } from './registration-file.js';
 
 /**
@@ -556,14 +557,14 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
       // caller needs to render the value faithfully.
       const decimals = Number(summaryDecimals);
       const rawValue = Number(summaryValue);
-      const hasScore = feedbackCount > 0;
+      const hasFeedback = feedbackCount > 0;
 
       return {
         feedbackCount,
         clientCount: clients.length,
-        summaryValue: hasScore ? rawValue : null,
-        summaryDecimals: hasScore ? decimals : null,
-        score: hasScore ? rawValue / 10 ** decimals : null,
+        summaryValue: hasFeedback ? rawValue : null,
+        summaryDecimals: hasFeedback ? decimals : null,
+        score: hasFeedback ? decodeScore(rawValue, decimals) : null,
         source: SOURCE_NAME,
         computedAt: now,
       };
