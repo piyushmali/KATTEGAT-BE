@@ -1,0 +1,91 @@
+name: Ingest agents
+
+# Keeps the index current without running a server.
+#
+# WHY GITHUB ACTIONS AND NOT CRON ON A BOX
+#
+# The obvious objection to a scheduled job is hosting cost, and it does not apply here:
+# this needs no always-on process. The work is a short CLI invocation against Postgres,
+# so a scheduled workflow does it on GitHub's runners for nothing, and the run history is
+# more observable than crontab on a machine nobody is watching.
+#
+# WHY ONE JOB AND NOT LOG REPLAY
+#
+# ERC-8004 mints agent ids from a monotonic counter, so every new registration has a
+# higher id than the last. Walking from our cursor to the highest minted id therefore
+# catches everything new — no `eth_getLogs`, and so no dependence on log retention. That
+# matters because free RPC tiers cannot serve log history at all: Alchemy's free tier caps
+# `eth_getLogs` at 10 blocks and publicnode retains roughly 8k, which on BSC is about two
+# hours. The id walk has no such limit.
+#
+# Measured: 412 new agents caught up in 5 seconds, one pass.
+#
+# COST
+#
+# Private repositories get 2,000 free Actions minutes a month, and GitHub bills whole
+# minutes per job. At roughly one minute a run that allows a 30-minute cadence with room
+# to spare. Public repositories get unlimited minutes, so making these public — which a
+# hackathon submission usually wants anyway — permits every 5 minutes at no cost.
+#
+# The registry currently grows at roughly 150-275 agents an hour, so a 30-minute cadence
+# leaves the index at most ~140 agents behind out of 317,000: under 0.05%.
+
+on:
+  schedule:
+    # Every 30 minutes. GitHub does not guarantee punctuality for scheduled runs and may
+    # delay them under load, which is fine — the cursor makes every run resumable, so a
+    # late run simply covers a wider id range.
+    - cron: '*/30 * * * *'
+  # So a demo can be brought current on demand without waiting for the schedule.
+  workflow_dispatch:
+
+# A run that overlaps its predecessor would be refused by the database advisory lock
+# anyway. Cancelling here is cheaper than paying for a job that exits immediately.
+concurrency:
+  group: ingest
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    # Generous ceiling relative to the ~1 minute this takes, so a slow RPC does not fail
+    # the run, but bounded so a hung request cannot burn the monthly minute budget.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          # Caching the store is most of why a run fits in a minute.
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # New agents. Cheap and fast: two Multicall3 requests per 120 ids.
+      - name: Index new agents
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BSC_RPC_URL: ${{ secrets.BSC_RPC_URL }}
+          BSC_RPC_URL_FALLBACK: ${{ secrets.BSC_RPC_URL_FALLBACK }}
+        run: pnpm sync:agents --backfill --loop
+
+      # Registration files that discovery deferred — the ~6% published behind a
+      # third-party URL rather than inline. Bounded per run because this step waits on
+      # other people's web servers, and one slow host must not consume the whole budget.
+      #
+      # `continue-on-error` because a description arriving late is not a failure: the
+      # agent is already indexed and browsable, and the UI shows unresolved metadata
+      # honestly rather than hiding the agent.
+      - name: Resolve deferred registration files
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BSC_RPC_URL: ${{ secrets.BSC_RPC_URL }}
+          IPFS_GATEWAY_URL: ${{ secrets.IPFS_GATEWAY_URL }}
+        run: pnpm sync:agents --metadata --loop --limit 240
