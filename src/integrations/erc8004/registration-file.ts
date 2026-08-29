@@ -12,7 +12,21 @@ import { z } from 'zod';
  */
 
 const MAX_BYTES = 512 * 1024;
-const TIMEOUT_MS = 8_000;
+
+/**
+ * Per-file fetch budget.
+ *
+ * A registration file is a small JSON document, so a slow response almost always means
+ * an unreachable host rather than a large payload — and an unreachable host costs the
+ * full budget, multiplied by however many agents point at it. Measured across the
+ * registry, 7,936 fetchable agents share just 23 hosts, so one dead domain is thousands
+ * of timeouts, not one.
+ *
+ * 5s is well beyond what a healthy host needs while halving what a dead one costs.
+ * Anything that misses it is recorded as unresolved, which is a state the UI already
+ * shows honestly rather than an error.
+ */
+const TIMEOUT_MS = 5_000;
 
 /**
  * Every field is optional on read even where the spec says MUST.
