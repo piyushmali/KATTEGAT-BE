@@ -4,6 +4,7 @@ import type { AgentSource } from '../../integrations/agent-source.js';
 import type { AgentEnrichmentSource } from '../../integrations/erc8004/explorer-client.js';
 import type { AgentReputationResponse } from './reputation.schema.js';
 import type { ReputationRepository, StoredReputation } from './reputation.repository.js';
+import { decodeScore, explainMissingScore } from './score.js';
 
 /**
  * Live reputation reads.
@@ -35,8 +36,11 @@ export interface ReputationServiceDeps {
   logger: Logger;
 }
 
-const decode = (value: number | null, decimals: number | null): number | null =>
-  value === null || decimals === null ? null : value / 10 ** decimals;
+/*
+ * Decoding lives in ./score.ts so the live chain read and this cached path cannot
+ * disagree about what counts as a score. They did before: this one divided without
+ * checking the range, so a generic numeric signal was served as a rating.
+ */
 
 export function createReputationService({
   repository,
@@ -102,6 +106,14 @@ export function createReputationService({
         notes.push('No client feedback recorded on chain yet.');
       }
 
+      /*
+       * Feedback exists but does not amount to a score. Said explicitly, because
+       * otherwise this is indistinguishable from having no feedback at all — and for
+       * someone deciding whether to trust an agent those are different situations.
+       */
+      const rangeNote = explainMissingScore(snapshot.summaryValue, snapshot.summaryDecimals);
+      if (rangeNote) notes.push(rangeNote);
+
       // Enrichment is strictly additive and never allowed to break the response.
       let explorerData: AgentReputationResponse['data']['explorer'] = null;
       if (explorer.enabled) {
@@ -133,7 +145,7 @@ export function createReputationService({
           client_count: snapshot.clientCount,
           summary_value: snapshot.summaryValue,
           summary_decimals: snapshot.summaryDecimals,
-          score: decode(snapshot.summaryValue, snapshot.summaryDecimals),
+          score: decodeScore(snapshot.summaryValue, snapshot.summaryDecimals),
           origin,
           computed_at: snapshot.computedAt.toISOString(),
           notes,
