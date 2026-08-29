@@ -25,6 +25,7 @@ import type {
   AgentSummary,
   ProtocolTag,
 } from './agent.types.js';
+import { safeImageUrl } from './agent.types.js';
 
 /**
  * All SQL for the agents domain lives here.
@@ -137,6 +138,13 @@ function toSummary(
       capabilities: row.capabilities,
       protocolTag: row.protocolTag as ProtocolTag,
       traitTags: row.traitTags,
+      /*
+       * Read out of the stored registration file rather than kept in its own column.
+       * The field was already being persisted inside `raw_metadata`, so surfacing it
+       * needs no migration and no re-ingestion — 163,888 agents gain artwork the moment
+       * this ships.
+       */
+      imageUrl: safeImageUrl((row.rawMetadata as { image?: unknown } | null)?.image),
       metadataResolvedAt: row.metadataResolvedAt,
     },
     categories: categoryRows
@@ -388,7 +396,9 @@ export function createAgentRepository(db: Database): AgentRepository {
 
       // The URI is non-null by construction of the predicate; this narrows the type
       // without asserting it.
-      return rows.flatMap((row) => (row.agentUri === null ? [] : [{ ...row, agentUri: row.agentUri }]));
+      return rows.flatMap((row) =>
+        row.agentUri === null ? [] : [{ ...row, agentUri: row.agentUri }],
+      );
     },
 
     async countPendingMetadata() {

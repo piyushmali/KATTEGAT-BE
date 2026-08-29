@@ -11,6 +11,7 @@ import type { Logger } from 'pino';
 import type { Env } from '../../config/env.js';
 import { upstreamUnavailable } from '../../shared/errors.js';
 import type { AgentReputation } from '../../modules/agents/agent.types.js';
+import { safeImageUrl } from '../../modules/agents/agent.types.js';
 import type {
   AgentSource,
   AgentSourceCursor,
@@ -324,6 +325,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
                   capabilities: [],
                   protocolTag: 'unconfigured' as const,
                   traitTags: [],
+                  imageUrl: null,
                   metadataResolvedAt: null,
                 },
                 rawMetadata: null,
@@ -357,6 +359,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
                   capabilities: [],
                   protocolTag: 'unconfigured' as const,
                   traitTags: [],
+                  imageUrl: null,
                   metadataResolvedAt: null,
                 },
                 rawMetadata: null,
@@ -382,6 +385,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
                   capabilities: registration.capabilities,
                   protocolTag: registration.protocolTag,
                   traitTags: registration.traitTags,
+                  imageUrl: safeImageUrl(registration.file.image),
                   metadataResolvedAt: new Date(),
                 },
                 rawMetadata: registration.file,
@@ -403,6 +407,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
                   capabilities: [],
                   protocolTag: 'unconfigured' as const,
                   traitTags: [],
+                  imageUrl: null,
                   metadataResolvedAt: null,
                 },
                 rawMetadata: null,

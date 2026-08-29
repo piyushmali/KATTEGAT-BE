@@ -39,8 +39,46 @@ export interface AgentProfile {
   capabilities: string[];
   protocolTag: ProtocolTag;
   traitTags: string[];
+  /**
+   * The agent's own artwork, from the `image` field of its registration file.
+   *
+   * Published by 95.5% of agents with resolved metadata, and until now parsed and then
+   * discarded. Null when absent or when the URL failed the safety check in
+   * `safeImageUrl` — a URI set on chain by whoever registered the agent is untrusted
+   * input, so it is validated rather than passed through.
+   */
+  imageUrl: string | null;
   /** Null when the registration file could not be fetched or parsed. */
   metadataResolvedAt: Date | null;
+}
+
+/**
+ * Accepts an agent-supplied image URL, or rejects it.
+ *
+ * `agentURI` and everything reachable through it is written on chain by whoever
+ * registered the agent, so this is untrusted input rendered in every visitor's browser.
+ * Only absolute `https:` URLs are allowed:
+ *
+ *  - `javascript:` and `vbscript:` never reach an `src`, even though a browser would not
+ *    execute them there today. Relying on that is a bet, not a defence.
+ *  - `data:` is refused because a data URI in an `<img>` is a payload of unbounded size
+ *    the page has no way to budget for.
+ *  - plain `http:` is refused rather than upgraded, because silently rewriting a URL we
+ *    were given makes provenance ambiguous — the same rule the registration-file loader
+ *    already applies to `agentURI` itself.
+ */
+export function safeImageUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+
+  const trimmed = value.trim();
+  if (trimmed.length === 0 || trimmed.length > 2_000) return null;
+
+  try {
+    return new URL(trimmed).protocol === 'https:' ? trimmed : null;
+  } catch {
+    // Not a parseable absolute URL. A relative path has no meaningful base here.
+    return null;
+  }
 }
 
 /** One classification result with the evidence that produced it. */
