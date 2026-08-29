@@ -74,6 +74,46 @@ pnpm dev                      # http://127.0.0.1:4000  (docs at /docs)
 `pnpm sync:agents` is what populates the marketplace. Without it the API is healthy
 but the catalogue is empty, and `/discover` in the frontend will say so.
 
+## Keeping the index current
+
+The whole ERC-8004 registry is indexed — 317k agents — and it grows by roughly
+150–275 agents an hour, so it needs refreshing. Two things make that cheap.
+
+**Agent ids are a monotonic counter.** Every new registration gets a higher id than
+the last, so walking from the stored cursor to the highest minted id catches
+everything new. No `eth_getLogs`, and therefore no dependence on log retention —
+which matters because no free RPC tier can serve log history: Alchemy's free tier
+caps `eth_getLogs` at 10 blocks and publicnode retains about 8k, roughly two hours
+of BSC. Measured, catching up 412 new agents took **5 seconds in one pass**.
+
+**It needs no server.** `.github/workflows/ingest.yml` runs the CLI on GitHub's
+runners every 30 minutes. Private repositories get 2,000 free Actions minutes a
+month and a run costs about one, so a 30-minute cadence fits with room to spare;
+public repositories get unlimited minutes and can run every 5.
+
+```bash
+pnpm sync:agents --backfill --loop     # index new agents (the catch-up job)
+pnpm sync:agents --metadata --loop     # fetch registration files that were deferred
+```
+
+Both are safe to overlap. Every ingestion mode takes a Postgres advisory lock, so a
+run that starts while another is going exits `0` with
+`{"skipped":"ingestion already running"}` rather than racing the cursor — which it
+otherwise would, and which has been observed driving the cursor *backwards*.
+
+Two deliberate gaps, both visible in the product rather than hidden:
+
+- **Registration files behind a third-party URL are fetched separately.** Discovery
+  records an agent's on-chain identity immediately and defers the HTTP fetch, because
+  one slow host was setting the rate the whole catalogue could grow at — 4 seconds of
+  chain reads inside a 65-second pass. Inline `data:` URIs, 82% of the registry, are
+  still resolved on the spot. An agent is browsable the moment it is discovered, and
+  unresolved metadata renders as unresolved.
+- **Reputation is read on demand,** when an agent's page is opened, so the
+  marketplace-wide feedback counters describe what has been *read* rather than what
+  exists on chain. The copy says so. Reading it for all 317k agents would be two RPC
+  calls each and is a much larger job than the walk.
+
 ## Commands
 
 | Command             | Purpose                                                   |
@@ -87,7 +127,8 @@ but the catalogue is empty, and `/discover` in the frontend will say so.
 | `pnpm db:generate`  | Generate a migration from the schema                      |
 | `pnpm db:migrate`   | Apply pending migrations                                  |
 | `pnpm db:studio`    | Drizzle Studio                                            |
-| `pnpm sync:agents`  | Ingest agents (`--full` re-scans the widest window)       |
+| `pnpm sync:agents`  | Ingest agents (`--backfill --loop` catches up; `--metadata` fetches deferred files) |
+| `pnpm reclassify`   | Re-run classification over the whole index                 |
 | `pnpm verify:chain` | Live end-to-end check of the ERC-8004 integration         |
 
 ## API
