@@ -29,6 +29,7 @@ export function toWireAgent(agent: AgentSummary): AgentSummaryResponse {
       capabilities: agent.profile.capabilities,
       protocol_tag: agent.profile.protocolTag,
       trait_tags: agent.profile.traitTags,
+      image_url: agent.profile.imageUrl,
       metadata_resolved_at: iso(agent.profile.metadataResolvedAt),
     },
     categories: agent.categories.map((assignment) => ({

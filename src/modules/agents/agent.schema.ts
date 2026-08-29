@@ -86,6 +86,14 @@ export const agentProfileSchema = z.object({
   protocol_tag: z.string(),
   trait_tags: z.array(z.string()),
   /**
+   * The agent's own artwork, taken from the `image` field of its registration file.
+   *
+   * Always an absolute `https:` URL or null — the value is written on chain by whoever
+   * registered the agent, so it is validated server-side before it is offered to a
+   * browser. Clients still need a fallback: the host is a third party and may be gone.
+   */
+  image_url: z.string().nullable(),
+  /**
    * Null means the off-chain registration file could not be fetched or parsed.
    * The agent is still real — its identity is on-chain — so the UI should render
    * a partial state rather than hide it.

@@ -11,6 +11,7 @@ import type { Logger } from 'pino';
 import type { Env } from '../../config/env.js';
 import { upstreamUnavailable } from '../../shared/errors.js';
 import type { AgentReputation } from '../../modules/agents/agent.types.js';
+import { safeImageUrl } from '../../modules/agents/agent.types.js';
 import type {
   AgentSource,
   AgentSourceCursor,
@@ -19,7 +20,8 @@ import type {
 } from '../agent-source.js';
 import { identityRegistryAbi, reputationRegistryAbi } from './abi.js';
 import { decodeScore } from '../../modules/reputation/score.js';
-import { loadRegistrationFile } from './registration-file.js';
+import type { ProtocolTag } from './registration-file.js';
+import { loadRegistrationFile, needsNetworkFetch } from './registration-file.js';
 
 /**
  * Reads agents straight from the ERC-8004 registries on BNB Smart Chain.
@@ -40,8 +42,24 @@ const REGISTERED_EVENT = parseAbiItem(
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
 
-/** How many registration files to fetch at once. Keeps IPFS gateways happy. */
-const METADATA_CONCURRENCY = 5;
+/**
+ * How many registration files to fetch at once.
+ *
+ * Raised from 5 after measuring the corpus. Most agents cost nothing here — 82% of the
+ * registry publishes an inline `data:` URI needing no network at all, and IPFS accounts
+ * for well under 1% — so the old limit was throttling the whole walk to protect gateways
+ * it barely touches.
+ *
+ * Not raised further, and the reason is the shape of the data: the 7,936 fetchable
+ * agents point at only 23 distinct hosts, so concurrency here lands on a handful of
+ * origins rather than spreading out. 12 keeps the average per host low enough to stay
+ * a polite client while roughly doubling throughput on a fetch-heavy stretch.
+ *
+ * ponytail: a flat limit, not a per-host pool. The ceiling is that an unlucky batch can
+ * put all 12 slots on one origin. Upgrade path if that ever matters: key the limiter by
+ * hostname.
+ */
+const METADATA_CONCURRENCY = 12;
 
 /**
  * Agent ids per Multicall3 request during an ID-walk backfill.
@@ -51,9 +69,43 @@ const METADATA_CONCURRENCY = 5;
  */
 const ID_MULTICALL_CHUNK = 120;
 
+/**
+ * Multicall chunks in flight at once, per method.
+ *
+ * The walk is latency-bound: a BSC round trip from here measures ~1.4s against Alchemy,
+ * publicnode and the public dataseed alike, so the endpoint is not the problem and
+ * waiting on one chunk at a time simply leaves the connection idle.
+ *
+ * Three methods are read concurrently, so the real ceiling is 3x this — twelve
+ * simultaneous requests, which is well within what an RPC provider expects from one
+ * client and still far below anything that would look abusive.
+ */
+const ID_MULTICALL_CONCURRENCY = 4;
+
 export interface ChainReaderOptions {
   env: Env;
   logger: Logger;
+}
+
+/** Options for the ID-walk discovery path. */
+export interface IdRangeOptions {
+  /**
+   * Record agents whose registration file lives behind an HTTPS or IPFS URL without
+   * fetching it, leaving `metadataResolvedAt` null for a later backlog pass.
+   *
+   * Inline `data:` URIs are resolved regardless — they need no network.
+   */
+  deferNetworkMetadata?: boolean;
+}
+
+/** The profile fields a registration file contributes, once resolved. */
+export interface ResolvedProfile {
+  name: string | null;
+  description: string | null;
+  capabilities: string[];
+  protocolTag: ProtocolTag;
+  traitTags: string[];
+  rawMetadata: unknown;
 }
 
 /**
@@ -83,7 +135,9 @@ export interface ChainAgentSource extends AgentSource {
    * Discovers agents by id instead of by log replay. The backfill path — reaches
    * the whole registry, where log replay is bounded by RPC log retention.
    */
-  discoverByIdRange(fromId: number, toId: number): Promise<DiscoveryPage>;
+  discoverByIdRange(fromId: number, toId: number, options?: IdRangeOptions): Promise<DiscoveryPage>;
+  /** Resolves one deferred registration file. Used by the metadata backlog pass. */
+  resolveRegistration(agentUri: string): Promise<ResolvedProfile>;
   /**
    * Oldest block this endpoint will actually serve `eth_getLogs` for.
    *
@@ -236,6 +290,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
    */
   async function resolveCandidates(
     candidates: AgentCandidate[],
+    deferNetworkMetadata = false,
   ): Promise<Omit<DiscoveryPage, 'cursor'>> {
     const agents: DiscoveredAgent[] = [];
     const unresolved: { id: string; reason: string }[] = [];
@@ -270,11 +325,48 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
                   capabilities: [],
                   protocolTag: 'unconfigured' as const,
                   traitTags: [],
+                  imageUrl: null,
                   metadataResolvedAt: null,
                 },
                 rawMetadata: null,
               },
               failure: { id, reason: 'no agentURI set on chain' },
+            };
+          }
+
+          /*
+           * Deferred fetch. The agent is recorded now with its URI intact and metadata
+           * marked unresolved, and a later pass retrieves the document.
+           *
+           * This is what stops a slow third party from throttling discovery. Measured on
+           * the live registry, reading 1,200 agents over Multicall3 takes about four
+           * seconds while the pass takes sixty-five — and one host,
+           * `metadata.evoevo.ai`, serves ~90% of the fetches in some id ranges at 1.25s
+           * each. Their latency was setting the rate at which our catalogue could grow,
+           * which is the wrong coupling.
+           *
+           * Inline `data:` URIs are never deferred: they are a base64 decode with no
+           * network involved, and they are 82% of the registry, so discovery still
+           * resolves most metadata immediately.
+           */
+          if (deferNetworkMetadata && needsNetworkFetch(identity.agentUri, env.IPFS_GATEWAY_URL)) {
+            return {
+              agent: {
+                identity,
+                profile: {
+                  name: `Agent #${String(numericId)}`,
+                  description: null,
+                  capabilities: [],
+                  protocolTag: 'unconfigured' as const,
+                  traitTags: [],
+                  imageUrl: null,
+                  metadataResolvedAt: null,
+                },
+                rawMetadata: null,
+              },
+              // Not a failure. Nothing has been attempted yet, and the backlog pass
+              // finds this row by its null `metadataResolvedAt`.
+              failure: null,
             };
           }
 
@@ -293,6 +385,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
                   capabilities: registration.capabilities,
                   protocolTag: registration.protocolTag,
                   traitTags: registration.traitTags,
+                  imageUrl: safeImageUrl(registration.file.image),
                   metadataResolvedAt: new Date(),
                 },
                 rawMetadata: registration.file,
@@ -314,6 +407,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
                   capabilities: [],
                   protocolTag: 'unconfigured' as const,
                   traitTags: [],
+                  imageUrl: null,
                   metadataResolvedAt: null,
                 },
                 rawMetadata: null,
@@ -331,6 +425,26 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
     }
 
     return { agents, unresolved };
+  }
+
+  /**
+   * Fetches and interprets one registration file.
+   *
+   * Exposed for the metadata backlog pass, which retries the documents discovery chose
+   * to defer. Errors propagate: the caller decides whether a given failure means "record
+   * this as unresolved" or "stop", and it has the agent id to log against.
+   */
+  async function resolveRegistration(agentUri: string): Promise<ResolvedProfile> {
+    const registration = await loadRegistrationFile(agentUri, env.IPFS_GATEWAY_URL);
+
+    return {
+      name: registration.file.name?.trim() ?? null,
+      description: registration.file.description?.trim() ?? null,
+      capabilities: registration.capabilities,
+      protocolTag: registration.protocolTag,
+      traitTags: registration.traitTags,
+      rawMetadata: registration.file,
+    };
   }
 
   /**
@@ -390,7 +504,11 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
    * guessed. Ids are monotonic with registration order, so the repository falls back
    * to ordering by agent id when the date is missing.
    */
-  async function discoverByIdRange(fromId: number, toId: number): Promise<DiscoveryPage> {
+  async function discoverByIdRange(
+    fromId: number,
+    toId: number,
+    options?: IdRangeOptions,
+  ): Promise<DiscoveryPage> {
     const start = Math.max(1, fromId);
     if (toId < start) return { agents: [], cursor: start - 1, unresolved: [] };
 
@@ -405,20 +523,49 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
      * safe and keeps each response small.
      */
     const read = async <T>(functionName: 'ownerOf' | 'tokenURI' | 'getAgentWallet') => {
+      const chunks: bigint[][] = [];
+      for (let i = 0; i < ids.length; i += ID_MULTICALL_CHUNK) {
+        chunks.push(ids.slice(i, i + ID_MULTICALL_CHUNK));
+      }
+
       const out: { status: 'success' | 'failure'; result?: T }[] = [];
 
-      for (let i = 0; i < ids.length; i += ID_MULTICALL_CHUNK) {
-        const slice = ids.slice(i, i + ID_MULTICALL_CHUNK);
-        const results = await client.multicall({
-          allowFailure: true,
-          contracts: slice.map((agentId) => ({
-            address: identityAddress,
-            abi: identityRegistryAbi,
-            functionName,
-            args: [agentId] as const,
-          })),
-        });
-        out.push(...(results as { status: 'success' | 'failure'; result?: T }[]));
+      /*
+       * Chunks are pipelined rather than awaited one at a time.
+       *
+       * Measured from this machine, a BSC round trip costs about 1.4 seconds against
+       * every endpoint tried — Alchemy, publicnode and the public dataseed alike — so
+       * this is latency, not a slow provider. Awaiting ten chunks in series spent that
+       * 1.4s ten times over per method and left the connection idle in between.
+       *
+       * `tokenURI` makes it worse than pure latency, because 82% of the registry
+       * publishes its whole registration file inline as a base64 `data:` URI. Those
+       * responses carry real payload, so serialising them wastes bandwidth as well as
+       * time.
+       *
+       * Waves keep order intact while bounding how much is in flight: this runs inside
+       * a `Promise.all` over three methods, so the real ceiling is three times the
+       * value below.
+       */
+      for (let i = 0; i < chunks.length; i += ID_MULTICALL_CONCURRENCY) {
+        const wave = chunks.slice(i, i + ID_MULTICALL_CONCURRENCY);
+        const settled = await Promise.all(
+          wave.map((slice) =>
+            client.multicall({
+              allowFailure: true,
+              contracts: slice.map((agentId) => ({
+                address: identityAddress,
+                abi: identityRegistryAbi,
+                functionName,
+                args: [agentId] as const,
+              })),
+            }),
+          ),
+        );
+
+        for (const results of settled) {
+          out.push(...(results as { status: 'success' | 'failure'; result?: T }[]));
+        }
       }
 
       return out;
@@ -470,7 +617,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
       });
     });
 
-    const page = await resolveCandidates(candidates);
+    const page = await resolveCandidates(candidates, options?.deferNetworkMetadata ?? false);
     return { ...page, cursor: toId };
   }
 
@@ -650,6 +797,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
     resolveStartBlock,
     highestAgentId,
     discoverByIdRange,
+    resolveRegistration,
   };
 }
 

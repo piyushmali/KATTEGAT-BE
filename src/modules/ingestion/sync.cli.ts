@@ -3,7 +3,13 @@ import { createDatabase } from '../../infrastructure/database/client.js';
 import { createLogger } from '../../infrastructure/logging/logger.js';
 import { createChainReader } from '../../integrations/erc8004/chain-reader.js';
 import { createAgentRepository } from '../agents/agent.repository.js';
-import { backfillAgents, syncAgents } from './sync.js';
+import {
+  backfillAgents,
+  backfillHasMore,
+  resolveMetadataBacklog,
+  syncAgents,
+  withIngestionLock,
+} from './sync.js';
 
 /**
  * Runs one ingestion pass and exits.
@@ -13,6 +19,11 @@ import { backfillAgents, syncAgents } from './sync.js';
  *   pnpm sync:agents --backfill          walk agent ids (reaches the whole registry)
  *   pnpm sync:agents --backfill --limit 500
  *   pnpm sync:agents --backfill --loop   repeat until the registry is exhausted
+ *
+ * `--loop` is a long job — the full registry is ~300k ids at roughly 65 ids/sec — so it
+ * reports progress with an ETA and stops cleanly on SIGINT, finishing the pass in flight
+ * before it saves. Interrupting it is safe at any point: the cursor advances per pass,
+ * so resuming repeats at most one batch.
  *
  * Incremental sync replays logs, which is cheap but bounded by the endpoint's log
  * retention. Backfill walks ids with plain `eth_call`, which has no retention limit
@@ -49,28 +60,201 @@ async function main(): Promise<void> {
       repository: createAgentRepository(handle.db),
     };
 
-    if (!isBackfill) {
-      const result = await syncAgents({ ...deps, full: process.argv.includes('--full') });
-      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-      return;
-    }
+    /*
+     * Every mode runs under one advisory lock. Two ingestion processes sharing a cursor
+     * stomp each other — observed, with the cursor moving backwards 160,000 ids — and the
+     * everyday cause is a scheduled run starting before the previous one has finished.
+     */
+    const outcome = await withIngestionLock(handle.db, logger, async () => {
+      /*
+       * Stop at the end of the current pass rather than mid-write.
+       *
+       * Declared before either looping mode because both need it: a full walk and a full
+       * metadata backlog each run for a long time, so being able to stop them cleanly is a
+       * requirement. Killing the process outright would abandon a pass whose work was done
+       * but not committed — recoverable, since the cursor only advances on success, but
+       * finishing the pass is free and keeps the log honest about where it reached.
+       */
+      let stopping = false;
+      const requestStop = () => {
+        if (stopping) return;
+        stopping = true;
+        logger.warn('stop requested — finishing the current pass, then saving progress');
+      };
+      process.once('SIGINT', requestStop);
+      process.once('SIGTERM', requestStop);
 
-    // One pass, or repeated passes until the registry is exhausted. Each pass
-    // commits its own cursor, so interrupting `--loop` loses at most one batch.
-    let totalPersisted = 0;
-    let passes = 0;
+      /*
+       * The metadata backlog: fetches the registration files the ID walk deferred.
+       *
+       * A separate mode rather than part of the walk, because the two are bound by
+       * different things. Discovery is bound by RPC round trips and finishes in minutes;
+       * this is bound by other people's web servers and takes as long as they take. Running
+       * them together meant the slower one set the pace for both.
+       */
+      if (process.argv.includes('--metadata')) {
+        let attempted = 0;
+        let resolved = 0;
+        let failed = 0;
+        let passes = 0;
 
-    for (;;) {
-      const result = await backfillAgents({ ...deps, ...(limit === undefined ? {} : { limit }) });
-      totalPersisted += result.persisted;
-      passes += 1;
+        for (;;) {
+          const result = await resolveMetadataBacklog({
+            ...deps,
+            ...(limit === undefined ? {} : { limit }),
+          });
+          attempted += result.attempted;
+          resolved += result.resolved;
+          failed += result.failed;
+          passes += 1;
 
-      if (!loop || result.remaining === 0 || result.discovered === 0) {
+          // `attempted === 0` is the real end: nothing was left to try. A pass where
+          // everything failed still has work remaining, so `remaining` alone would spin.
+          const exhausted = result.attempted === 0;
+          if (!loop || exhausted || stopping) {
+            process.stdout.write(
+              `${JSON.stringify(
+                {
+                  mode: 'metadata',
+                  passes,
+                  attempted,
+                  resolved,
+                  failed,
+                  remaining: result.remaining,
+                },
+                null,
+                2,
+              )}\n`,
+            );
+            return;
+          }
+
+          /*
+           * A pass that resolved nothing but attempted plenty means every host in that
+           * slice is failing. Continuing would spin through the whole backlog re-failing,
+           * so stop and say so rather than burning hours to no effect.
+           */
+          if (result.resolved === 0) {
+            logger.warn(
+              { attempted: result.attempted, remaining: result.remaining },
+              'metadata pass resolved nothing — stopping rather than looping over failures',
+            );
+            process.stdout.write(
+              `${JSON.stringify(
+                {
+                  mode: 'metadata',
+                  passes,
+                  attempted,
+                  resolved,
+                  failed,
+                  remaining: result.remaining,
+                  stalled: true,
+                },
+                null,
+                2,
+              )}\n`,
+            );
+            return;
+          }
+
+          logger.info(
+            { passes, resolved, failed, remaining: result.remaining },
+            'metadata progress',
+          );
+        }
+      }
+
+      if (!isBackfill) {
+        const result = await syncAgents({ ...deps, full: process.argv.includes('--full') });
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+        return;
+      }
+
+      /*
+       * One pass, or repeated passes until the registry is exhausted. Each pass commits
+       * its own cursor, so interrupting `--loop` loses at most one batch.
+       */
+      let totalPersisted = 0;
+      let totalDiscovered = 0;
+      let passes = 0;
+      const startedAt = Date.now();
+
+      /*
+       * Resolved once and handed to every pass. Each call bisects the id space for about
+       * nineteen `eth_call`s, which across a few hundred passes is thousands of requests
+       * spent re-learning something that barely changes.
+       */
+      const knownHighestAgentId = loop ? await deps.source.highestAgentId() : undefined;
+
+      for (;;) {
+        const result = await backfillAgents({
+          ...deps,
+          ...(limit === undefined ? {} : { limit }),
+          ...(knownHighestAgentId === undefined ? {} : { knownHighestAgentId }),
+        });
+        totalPersisted += result.persisted;
+        totalDiscovered += result.discovered;
+        passes += 1;
+
+        /*
+         * `remaining` is the only correct termination condition.
+         *
+         * This previously also stopped on `discovered === 0`, which is wrong: an id range
+         * containing no minted agents is a gap in the registry, not the end of it. Any
+         * sparse stretch would have silently ended the walk early and reported success,
+         * which is the worst possible failure for a job whose whole purpose is
+         * completeness — it looks finished.
+         */
+        const done = !backfillHasMore(result);
+
+        if (loop && !done && !stopping) {
+          /*
+           * Progress and a rate-based estimate, because a multi-hour job that prints
+           * nothing is indistinguishable from one that has hung.
+           *
+           * The rate is measured over the whole run rather than the last pass, so a single
+           * slow batch does not throw the estimate around.
+           */
+          const elapsedSeconds = Math.max(1, (Date.now() - startedAt) / 1000);
+          const idsPerSecond = totalDiscovered / elapsedSeconds;
+
+          logger.info(
+            {
+              passes,
+              cursor: result.toId,
+              remaining: result.remaining,
+              totalPersisted,
+              idsPerSecond: Number(idsPerSecond.toFixed(1)),
+              etaMinutes: Number((result.remaining / Math.max(1, idsPerSecond) / 60).toFixed(1)),
+            },
+            'backfill progress',
+          );
+          continue;
+        }
+
         process.stdout.write(
-          `${JSON.stringify({ ...result, passes, totalPersisted }, null, 2)}\n`,
+          `${JSON.stringify(
+            {
+              ...result,
+              passes,
+              totalPersisted,
+              stoppedEarly: stopping && !done,
+              elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+            },
+            null,
+            2,
+          )}\n`,
         );
         return;
       }
+    });
+
+    /*
+     * `null` means the lock was held elsewhere. Not an error — the other process is doing
+     * the work — so this exits 0 rather than failing a cron job that behaved correctly.
+     */
+    if (outcome === null) {
+      process.stdout.write(`${JSON.stringify({ skipped: 'ingestion already running' })}\n`);
     }
   } finally {
     await handle.close();
