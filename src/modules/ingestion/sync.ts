@@ -60,6 +60,147 @@ const DEFAULT_MAX_REPUTATION_READS = 60;
  */
 const BACKFILL_BATCH = 1_200;
 
+/** Deferred registration files fetched per backlog pass. */
+const METADATA_BACKLOG_BATCH = 240;
+
+/**
+ * Concurrent fetches during a backlog pass.
+ *
+ * Higher than discovery's limit because this pass has nothing else to do — waiting on
+ * HTTP is its entire job, so idle connections are pure waste. Still bounded, because the
+ * backlog is dominated by a handful of hosts: 7,936 fetchable agents across 23 origins,
+ * one of which serves most of them.
+ *
+ * ponytail: a flat limit, not per-host. The ceiling is that an unlucky batch puts every
+ * slot on one origin. Upgrade path if a host starts refusing us: key the limiter by
+ * hostname and back off per host.
+ */
+const METADATA_BACKLOG_CONCURRENCY = 16;
+
+export interface MetadataBacklogResult {
+  mode: 'metadata';
+  attempted: number;
+  resolved: number;
+  failed: number;
+  /** Agents still awaiting a fetch after this pass. */
+  remaining: number;
+}
+
+/**
+ * Retrieves the registration files that discovery deferred.
+ *
+ * The counterpart to `deferNetworkMetadata`. Discovery records an agent's on-chain
+ * identity immediately and leaves `metadataResolvedAt` null when the document lives
+ * behind someone else's HTTPS or IPFS URL; this pass goes back for those.
+ *
+ * Separating them is the whole point. Measured on the live registry, reading 1,200 agents
+ * over Multicall3 takes about four seconds while a combined pass took sixty-five, because
+ * one third-party host served ~90% of the fetches at 1.25s each. Their latency was
+ * setting the rate at which the catalogue could grow. Now it only sets the rate at which
+ * descriptions arrive, and an agent is browsable — identity, owner, ownership verified on
+ * chain — the moment it is discovered.
+ *
+ * Writes go through the same `upsertMany` as discovery, so normalisation and
+ * classification cannot drift between the two paths.
+ */
+export async function resolveMetadataBacklog(
+  options: SyncOptions & { limit?: number },
+): Promise<MetadataBacklogResult> {
+  const { logger, source, repository } = options;
+  const limit = options.limit ?? METADATA_BACKLOG_BATCH;
+  const now = new Date();
+
+  const pending = await repository.findPendingMetadata(limit);
+  if (pending.length === 0) {
+    return { mode: 'metadata', attempted: 0, resolved: 0, failed: 0, remaining: 0 };
+  }
+
+  const payloads: AgentWritePayload[] = [];
+  let failed = 0;
+
+  for (let i = 0; i < pending.length; i += METADATA_BACKLOG_CONCURRENCY) {
+    const batch = pending.slice(i, i + METADATA_BACKLOG_CONCURRENCY);
+
+    const settled = await Promise.all(
+      batch.map(async (row) => {
+        try {
+          const profile = await source.resolveRegistration(row.agentUri);
+          return { row, profile, reason: null };
+        } catch (error) {
+          return {
+            row,
+            profile: null,
+            reason: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }),
+    );
+
+    for (const entry of settled) {
+      const { row } = entry;
+
+      if (entry.profile === null) {
+        failed += 1;
+        logger.debug({ agentId: row.agentId, reason: entry.reason }, 'metadata still unresolved');
+        /*
+         * Deliberately not written back.
+         *
+         * Marking a failure as resolved would remove it from the backlog and lose the
+         * retry; a transient outage would permanently strip an agent of its description.
+         * Leaving the row untouched means the next pass tries again, and the UI keeps
+         * showing it honestly as unresolved in the meantime.
+         */
+        continue;
+      }
+
+      const name = entry.profile.name ?? `Agent #${String(row.agentId)}`;
+
+      payloads.push({
+        agent: {
+          id: row.id,
+          chainId: row.chainId,
+          agentId: row.agentId,
+          ownerAddress: row.ownerAddress,
+          walletAddress: row.walletAddress,
+          agentUri: row.agentUri,
+          name,
+          description: entry.profile.description,
+          protocolTag: entry.profile.protocolTag,
+          traitTags: entry.profile.traitTags,
+          capabilities: entry.profile.capabilities,
+          rawMetadata: entry.profile.rawMetadata,
+          registeredAtBlock: row.registeredAtBlock,
+          registeredAt: row.registeredAt,
+          source: row.source,
+          metadataResolvedAt: now,
+          lastSyncedAt: now,
+        },
+        // Re-classified now that there is finally text to classify.
+        categories: classifyAgent({
+          name,
+          description: entry.profile.description,
+          capabilities: entry.profile.capabilities,
+        }),
+        reputation: null,
+      });
+    }
+  }
+
+  if (payloads.length > 0) await repository.upsertMany(payloads);
+
+  const remaining = await repository.countPendingMetadata();
+  const result: MetadataBacklogResult = {
+    mode: 'metadata',
+    attempted: pending.length,
+    resolved: payloads.length,
+    failed,
+    remaining,
+  };
+
+  logger.info(result, 'metadata backlog pass complete');
+  return result;
+}
+
 /**
  * Whether a looping backfill has more work to do.
  *
@@ -139,7 +280,14 @@ export async function backfillAgents(
   logger.info({ fromId: startId, toId: endId, highest }, 'backfill starting');
 
   try {
-    const page = await source.discoverByIdRange(startId, endId);
+    /*
+     * Network metadata is deferred here and collected by `resolveMetadataBacklog`.
+     *
+     * The walk's job is to get every agent's on-chain identity recorded and browsable.
+     * Blocking that on third-party HTTP made a 4-second multicall into a 65-second pass,
+     * and left the catalogue growing at the speed of the slowest host in the registry.
+     */
+    const page = await source.discoverByIdRange(startId, endId, { deferNetworkMetadata: true });
 
     const payloads: AgentWritePayload[] = page.agents.map((discovered) => ({
       agent: {

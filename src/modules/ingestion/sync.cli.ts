@@ -3,7 +3,12 @@ import { createDatabase } from '../../infrastructure/database/client.js';
 import { createLogger } from '../../infrastructure/logging/logger.js';
 import { createChainReader } from '../../integrations/erc8004/chain-reader.js';
 import { createAgentRepository } from '../agents/agent.repository.js';
-import { backfillAgents, backfillHasMore, syncAgents } from './sync.js';
+import {
+  backfillAgents,
+  backfillHasMore,
+  resolveMetadataBacklog,
+  syncAgents,
+} from './sync.js';
 
 /**
  * Runs one ingestion pass and exits.
@@ -54,6 +59,94 @@ async function main(): Promise<void> {
       repository: createAgentRepository(handle.db),
     };
 
+    /*
+     * Stop at the end of the current pass rather than mid-write.
+     *
+     * Declared before either looping mode because both need it: a full walk and a full
+     * metadata backlog each run for a long time, so being able to stop them cleanly is a
+     * requirement. Killing the process outright would abandon a pass whose work was done
+     * but not committed — recoverable, since the cursor only advances on success, but
+     * finishing the pass is free and keeps the log honest about where it reached.
+     */
+    let stopping = false;
+    const requestStop = () => {
+      if (stopping) return;
+      stopping = true;
+      logger.warn('stop requested — finishing the current pass, then saving progress');
+    };
+    process.once('SIGINT', requestStop);
+    process.once('SIGTERM', requestStop);
+
+    /*
+     * The metadata backlog: fetches the registration files the ID walk deferred.
+     *
+     * A separate mode rather than part of the walk, because the two are bound by
+     * different things. Discovery is bound by RPC round trips and finishes in minutes;
+     * this is bound by other people's web servers and takes as long as they take. Running
+     * them together meant the slower one set the pace for both.
+     */
+    if (process.argv.includes('--metadata')) {
+      let attempted = 0;
+      let resolved = 0;
+      let failed = 0;
+      let passes = 0;
+
+      for (;;) {
+        const result = await resolveMetadataBacklog({
+          ...deps,
+          ...(limit === undefined ? {} : { limit }),
+        });
+        attempted += result.attempted;
+        resolved += result.resolved;
+        failed += result.failed;
+        passes += 1;
+
+        // `attempted === 0` is the real end: nothing was left to try. A pass where
+        // everything failed still has work remaining, so `remaining` alone would spin.
+        const exhausted = result.attempted === 0;
+        if (!loop || exhausted || stopping) {
+          process.stdout.write(
+            `${JSON.stringify(
+              { mode: 'metadata', passes, attempted, resolved, failed, remaining: result.remaining },
+              null,
+              2,
+            )}\n`,
+          );
+          return;
+        }
+
+        /*
+         * A pass that resolved nothing but attempted plenty means every host in that
+         * slice is failing. Continuing would spin through the whole backlog re-failing,
+         * so stop and say so rather than burning hours to no effect.
+         */
+        if (result.resolved === 0) {
+          logger.warn(
+            { attempted: result.attempted, remaining: result.remaining },
+            'metadata pass resolved nothing — stopping rather than looping over failures',
+          );
+          process.stdout.write(
+            `${JSON.stringify(
+              {
+                mode: 'metadata',
+                passes,
+                attempted,
+                resolved,
+                failed,
+                remaining: result.remaining,
+                stalled: true,
+              },
+              null,
+              2,
+            )}\n`,
+          );
+          return;
+        }
+
+        logger.info({ passes, resolved, failed, remaining: result.remaining }, 'metadata progress');
+      }
+    }
+
     if (!isBackfill) {
       const result = await syncAgents({ ...deps, full: process.argv.includes('--full') });
       process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -68,24 +161,6 @@ async function main(): Promise<void> {
     let totalDiscovered = 0;
     let passes = 0;
     const startedAt = Date.now();
-
-    /*
-     * Stop at the end of the current pass rather than mid-write.
-     *
-     * A full walk takes hours, so being able to stop it is a requirement, not a
-     * nicety. Killing the process outright would abandon a pass whose agents were
-     * fetched but whose cursor had not been committed — that work is simply redone on
-     * resume, but finishing the pass is free and keeps the log honest about where it
-     * got to.
-     */
-    let stopping = false;
-    const requestStop = () => {
-      if (stopping) return;
-      stopping = true;
-      logger.warn('stop requested — finishing the current pass, then saving progress');
-    };
-    process.once('SIGINT', requestStop);
-    process.once('SIGTERM', requestStop);
 
     /*
      * Resolved once and handed to every pass. Each call bisects the id space for about

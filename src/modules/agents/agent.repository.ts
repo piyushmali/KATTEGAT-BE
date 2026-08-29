@@ -8,6 +8,7 @@ import {
   gte,
   ilike,
   inArray,
+  isNull,
   or,
   sql,
 } from 'drizzle-orm';
@@ -72,10 +73,38 @@ export interface AgentWritePayload {
   } | null;
 }
 
+/**
+ * An agent recorded from chain whose registration file has not been retrieved yet.
+ *
+ * Carries the whole persisted row rather than just the URI, because resolving metadata
+ * rewrites the agent through the same upsert path as discovery — sharing one write path
+ * is what stops the two from drifting on normalisation or classification.
+ */
+export interface PendingMetadataAgent {
+  id: string;
+  chainId: number;
+  agentId: number;
+  ownerAddress: string;
+  walletAddress: string | null;
+  agentUri: string;
+  registeredAtBlock: number | null;
+  registeredAt: Date | null;
+  source: string;
+}
+
 export interface AgentRepository {
   list(options: ListAgentsOptions): Promise<ListAgentsResult>;
   findById(id: string): Promise<AgentSummary | null>;
   upsertMany(payloads: AgentWritePayload[]): Promise<number>;
+  /**
+   * Agents awaiting a registration-file fetch, oldest id first.
+   *
+   * Ordered by id so repeated passes make forward progress over the same backlog
+   * deterministically instead of resampling the same rows.
+   */
+  findPendingMetadata(limit: number): Promise<PendingMetadataAgent[]>;
+  /** How many agents still have no resolved registration file. */
+  countPendingMetadata(): Promise<number>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -338,5 +367,51 @@ export function createAgentRepository(db: Database): AgentRepository {
 
       return payloads.length;
     },
+
+    async findPendingMetadata(limit) {
+      const rows = await db
+        .select({
+          id: agents.id,
+          chainId: agents.chainId,
+          agentId: agents.agentId,
+          ownerAddress: agents.ownerAddress,
+          walletAddress: agents.walletAddress,
+          agentUri: agents.agentUri,
+          registeredAtBlock: agents.registeredAtBlock,
+          registeredAt: agents.registeredAt,
+          source: agents.source,
+        })
+        .from(agents)
+        .where(pendingMetadata())
+        .orderBy(asc(agents.agentId))
+        .limit(limit);
+
+      // The URI is non-null by construction of the predicate; this narrows the type
+      // without asserting it.
+      return rows.flatMap((row) => (row.agentUri === null ? [] : [{ ...row, agentUri: row.agentUri }]));
+    },
+
+    async countPendingMetadata() {
+      const [row] = await db.select({ value: count() }).from(agents).where(pendingMetadata());
+      return row?.value ?? 0;
+    },
   };
+}
+
+/**
+ * Agents whose registration file is genuinely still owed to us.
+ *
+ * `metadata_resolved_at IS NULL` on its own is the wrong filter: it also matches agents
+ * with no URI at all, and agents whose document is permanently broken. Neither is fixable
+ * by fetching, so including them would mean the backlog never drains and every pass
+ * re-attempts the same dead rows.
+ *
+ * Restricting to https/ipfs selects exactly what discovery deferred. An unresolved inline
+ * `data:` URI is a parse failure, not pending work, because discovery never defers those.
+ */
+function pendingMetadata() {
+  return and(
+    isNull(agents.metadataResolvedAt),
+    or(ilike(agents.agentUri, 'https://%'), ilike(agents.agentUri, 'ipfs://%')),
+  );
 }
