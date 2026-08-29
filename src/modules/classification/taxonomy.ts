@@ -36,6 +36,17 @@ export const AGENT_CATEGORIES = [
   'code-smart-contracts',
   'content-media',
 
+  /*
+   * Added in v3 after measuring the uncategorized bucket rather than guessing at it.
+   *
+   * 2,317 indexed agents describe themselves as scoring or voting on AI model outputs
+   * to earn a reward — the single largest coherent cluster in the whole registry, and
+   * nothing in the taxonomy came close to it (`no-signal-match`, not a weak match). It
+   * is evaluation work, not execution and not research, so forcing it into an existing
+   * bucket would have been a worse answer than the `uncategorized` it was getting.
+   */
+  'model-evaluation',
+
   /** Indexed but not confidently placed. Deliberately visible, never hidden. */
   'uncategorized',
 ] as const;
@@ -232,6 +243,16 @@ export const CATEGORY_RULES: readonly CategoryRule[] = [
       'derivatives',
     ],
     phrases: [
+      /*
+       * Self-description, and the most common one in the registry: 2,285 indexed
+       * agents call themselves a "trading agent" and were landing in
+       * `uncategorized` anyway. They scored 1 on the bare `trading` keyword against
+       * a threshold of 2 — the classifier recorded `weak-signal:trading-execution`,
+       * which was an accurate report of a rule that was too strict rather than of a
+       * genuinely ambiguous agent. An agent stating its own function outright is
+       * phrase-strength evidence.
+       */
+      'trading agent',
       'trade execution',
       'execute trades',
       'trading strateg',
@@ -247,6 +268,59 @@ export const CATEGORY_RULES: readonly CategoryRule[] = [
     keywords: ['trading', 'trader', 'arbitrage', 'perp', 'swap', 'execution'],
     // A newsletter about trading is not a trading agent.
     counterKeywords: ['newsletter', 'educational only', 'course'],
+  },
+
+  {
+    category: 'model-evaluation',
+    label: 'Model Evaluation',
+    description:
+      'Scores, ranks or votes on AI model outputs. Evaluation and benchmarking work — judging what a model produced rather than trading, researching or building.',
+    /*
+     * Every term names a model or the act of judging one. A bare `evaluation` sat here
+     * briefly and had to go: it matched the OASF skill
+     * `evaluation_and_monitoring/quality_evaluation` at capability weight, which
+     * outranked a news aggregator's much stronger media signals and filed ClawNews —
+     * summarisation, search, `media_and_entertainment/news` — as a model evaluator.
+     *
+     * Exactly three agents in the whole index declare an evaluation-shaped capability, so
+     * the generic term bought almost nothing and cost a confident wrong answer. Same
+     * lesson as the `grid` term: breadth in a classifier is not coverage, it is noise
+     * that happens to score.
+     */
+    capabilityTerms: [
+      'model-evaluation',
+      'model-benchmarking',
+      'quality-evaluation',
+      'annotation',
+      'data-labeling',
+      'data-labelling',
+      'preference-ranking',
+      'rlhf',
+    ],
+    /*
+     * `score/vote` and `/arena` are the literal shapes the largest cluster uses. They
+     * read oddly for a taxonomy, and that is the point: these are matched because the
+     * corpus contains them, not because they sound like a category should.
+     */
+    phrases: [
+      'score/vote',
+      'vote on ai model',
+      'score ai model',
+      'model arena',
+      'evaluate model',
+      'model benchmark',
+      'human feedback',
+      'preference data',
+      'rank model',
+    ],
+    // No bare `evaluation` here either, for the reason above.
+    keywords: ['benchmark', 'annotate', 'rlhf', 'arena'],
+    /*
+     * An agent that *is* a model, or that trades on model output, is not doing
+     * evaluation work. Without these, "powered by a model" would pull in a large part
+     * of the registry, since almost every agent mentions a model somewhere.
+     */
+    counterKeywords: ['trading agent', 'powered by', 'llm-powered'],
   },
 
   {
@@ -425,5 +499,19 @@ export const SECONDARY_THRESHOLD = 2;
  * indexing ~19k agents showed the original four matched under 1% of the registry.
  * Bumped rather than left alone because a `rules-v1` row and a `rules-v2` row are
  * genuinely different claims.
+ *
+ * v3 addressed the uncategorized bucket by measuring it instead of guessing. Two
+ * findings, both from counting the corpus:
+ *
+ *   - 2,285 agents call themselves a "trading agent" and were failing on a threshold,
+ *     not on ambiguity. The classifier had been honestly logging
+ *     `weak-signal:trading-execution` for every one of them.
+ *   - 2,317 agents score or vote on AI model outputs, matched nothing at all, and
+ *     needed a category rather than a looser rule.
+ *
+ * Also the near miss worth recording: the largest cluster's descriptions contain the
+ * string "dgrid", and a careless `grid` term would have filed 4,692 model-evaluation
+ * agents under Grid Trading. The word-boundary rule in the classifier is what stopped
+ * that, and it is why terms are matched on boundaries rather than by substring.
  */
-export const CLASSIFIER_VERSION = 'rules-v2';
+export const CLASSIFIER_VERSION = 'rules-v3';
