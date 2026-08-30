@@ -6,6 +6,7 @@ import { syncState } from '../../infrastructure/database/schema.js';
 import type { ChainAgentSource } from '../../integrations/erc8004/chain-reader.js';
 import { classifyAgent } from '../classification/classifier.js';
 import type { AgentRepository, AgentWritePayload } from '../agents/agent.repository.js';
+import { agentDisplayName, blankToNull } from '../agents/agent.types.js';
 
 /**
  * Agent ingestion: fetch, validate, normalise, classify, persist, record cursor.
@@ -196,7 +197,7 @@ export async function resolveMetadataBacklog(
         continue;
       }
 
-      const name = entry.profile.name ?? `Agent #${String(row.agentId)}`;
+      const name = agentDisplayName(entry.profile.name, row.agentId);
 
       payloads.push({
         agent: {
@@ -207,7 +208,7 @@ export async function resolveMetadataBacklog(
           walletAddress: row.walletAddress,
           agentUri: row.agentUri,
           name,
-          description: entry.profile.description,
+          description: blankToNull(entry.profile.description),
           protocolTag: entry.profile.protocolTag,
           traitTags: entry.profile.traitTags,
           capabilities: entry.profile.capabilities,

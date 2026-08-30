@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { safeImageUrl, toAgentEndpoints, toDeclaredBoolean, toTrustModels } from './agent.types.js';
+import {
+  agentDisplayName,
+  blankToNull,
+  safeImageUrl,
+  toAgentEndpoints,
+  toDeclaredBoolean,
+  toTrustModels,
+} from './agent.types.js';
 
 /**
  * Everything asserted here is parsed out of an agent's registration file, which is
@@ -280,5 +287,46 @@ describe('toAgentEndpoints, template resolution', () => {
     );
 
     expect(endpoint?.url).toBeNull();
+  });
+});
+
+/**
+ * Blank is not absent, unless something makes it so.
+ *
+ * `?? fallback` does not catch `""`, so a registration file setting `"name": ""` produced
+ * an empty heading on 321 agent pages and an empty description paragraph on 529.
+ */
+describe('blankToNull', () => {
+  it('treats empty and whitespace-only as absent', () => {
+    expect(blankToNull('')).toBeNull();
+    expect(blankToNull('   ')).toBeNull();
+    expect(blankToNull('\n\t')).toBeNull();
+  });
+
+  it('leaves a real value alone, trimmed', () => {
+    expect(blankToNull('  Meridian  ')).toBe('Meridian');
+  });
+
+  it('passes null and undefined through', () => {
+    expect(blankToNull(null)).toBeNull();
+    expect(blankToNull(undefined)).toBeNull();
+  });
+
+  it('keeps a value that is only punctuation', () => {
+    // Odd, but it is what the operator published, and it is not blank.
+    expect(blankToNull('---')).toBe('---');
+  });
+});
+
+describe('agentDisplayName', () => {
+  it('falls back to the id for a blank name', () => {
+    // Agents 208, 209 and 554 publish `"name": ""` and rendered an empty <h1>.
+    expect(agentDisplayName('', 554)).toBe('Agent #554');
+    expect(agentDisplayName('   ', 208)).toBe('Agent #208');
+    expect(agentDisplayName(null, 209)).toBe('Agent #209');
+  });
+
+  it('keeps a published name', () => {
+    expect(agentDisplayName('flux-p0i7f.agent', 310_018)).toBe('flux-p0i7f.agent');
   });
 });

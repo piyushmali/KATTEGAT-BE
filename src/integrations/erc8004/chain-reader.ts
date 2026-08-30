@@ -12,6 +12,8 @@ import type { Env } from '../../config/env.js';
 import { upstreamUnavailable } from '../../shared/errors.js';
 import type { AgentProfile, AgentReputation } from '../../modules/agents/agent.types.js';
 import {
+  agentDisplayName,
+  blankToNull,
   safeImageUrl,
   toAgentEndpoints,
   toDeclaredBoolean,
@@ -397,8 +399,10 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
               agent: {
                 identity,
                 profile: {
-                  name: registration.file.name?.trim() ?? `Agent #${String(numericId)}`,
-                  description: registration.file.description?.trim() ?? null,
+                  // `?? fallback` alone let `"name": ""` through, because a blank string
+                  // is not nullish. See `blankToNull`.
+                  name: agentDisplayName(registration.file.name, numericId),
+                  description: blankToNull(registration.file.description),
                   capabilities: registration.capabilities,
                   protocolTag: registration.protocolTag,
                   traitTags: registration.traitTags,

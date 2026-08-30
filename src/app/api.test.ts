@@ -21,6 +21,21 @@ import type { AppInstance } from './app-instance.js';
 const TEST_CHAIN = 31337;
 const REBALANCER = `${String(TEST_CHAIN)}:1`;
 const YIELD_AGENT = `${String(TEST_CHAIN)}:2`;
+const NEWEST = `${String(TEST_CHAIN)}:3`;
+
+/**
+ * Carried by every fixture so a query can isolate them from real indexed data.
+ *
+ * These tests run against the same database the ingestion pipeline writes to, which holds
+ * 317,476 live agents. Without a way to select only the fixtures, a `per_page=100` request
+ * returns whatever happens to sort first, and the assertions become a statement about
+ * production data.
+ *
+ * They previously passed by accident. The fixtures set `registered_at` while 317,010 real
+ * rows leave it null, so the old `registered_at ... nulls last` ordering floated them to
+ * the front of every list. Fixing that ordering is what exposed the coupling.
+ */
+const FIXTURE_TRAIT = 'test-fixture-only';
 
 const databaseUrl = process.env.DATABASE_URL;
 
@@ -50,7 +65,7 @@ beforeAll(async () => {
       name: 'Test Rebalancer',
       description: 'Keeps a portfolio at its target allocation.',
       protocolTag: 'a2a',
-      traitTags: ['x402-paid', 'declared-active'],
+      traitTags: ['x402-paid', 'declared-active', FIXTURE_TRAIT],
       capabilities: ['rebalance'],
       registeredAtBlock: 100,
       registeredAt: new Date('2026-01-01T00:00:00Z'),
@@ -66,13 +81,39 @@ beforeAll(async () => {
       name: 'Test Yield Router',
       description: 'Chases the highest APY.',
       protocolTag: 'mcp',
-      traitTags: ['multichain'],
+      traitTags: ['multichain', FIXTURE_TRAIT],
       capabilities: ['yield'],
       registeredAtBlock: 200,
       registeredAt: new Date('2026-02-01T00:00:00Z'),
       source: 'test',
       // Left unresolved on purpose: the API must still return this agent.
       metadataResolvedAt: null,
+    },
+    {
+      /*
+       * The newest agent, and the one with no timestamp.
+       *
+       * This shape is 317,010 of 317,476 rows in production: found by the ID-walk
+       * backfill, which does not read the `Registered` event, so the block timestamp is
+       * unknown. Ordering by `registered_at ... nulls last` sent every one of them behind
+       * the handful that do have a date, and "Recently registered" opened on an agent
+       * 7,458 registrations old.
+       */
+      id: NEWEST,
+      chainId: TEST_CHAIN,
+      agentId: 3,
+      ownerAddress: '0x4444444444444444444444444444444444444444',
+      agentUri: 'ipfs://test-newest',
+      // Blank, not null. `?? fallback` does not catch this, and 321 production rows have it.
+      name: '',
+      description: '   ',
+      protocolTag: 'unconfigured',
+      traitTags: [FIXTURE_TRAIT],
+      capabilities: [],
+      registeredAtBlock: null,
+      registeredAt: null,
+      source: 'test',
+      metadataResolvedAt: new Date('2026-03-01T00:00:00Z'),
     },
   ]);
 
@@ -153,7 +194,7 @@ describe('GET /api/v1/agents', () => {
     guard();
     const response = await app.inject({
       method: 'GET',
-      url: '/api/v1/agents?category=rebalancing&per_page=100',
+      url: `/api/v1/agents?category=rebalancing&trait=${FIXTURE_TRAIT}&per_page=100`,
     });
 
     const body = response.json<{ data: { identity: { id: string } }[] }>();
@@ -166,7 +207,7 @@ describe('GET /api/v1/agents', () => {
     guard();
     const response = await app.inject({
       method: 'GET',
-      url: '/api/v1/agents?protocol=mcp&per_page=100',
+      url: `/api/v1/agents?protocol=mcp&trait=${FIXTURE_TRAIT}&per_page=100`,
     });
 
     const ids = response
@@ -180,11 +221,11 @@ describe('GET /api/v1/agents', () => {
     guard();
     const both = await app.inject({
       method: 'GET',
-      url: '/api/v1/agents?trait=x402-paid&trait=declared-active&per_page=100',
+      url: `/api/v1/agents?trait=x402-paid&trait=declared-active&trait=${FIXTURE_TRAIT}&per_page=100`,
     });
     const impossible = await app.inject({
       method: 'GET',
-      url: '/api/v1/agents?trait=x402-paid&trait=multichain&per_page=100',
+      url: `/api/v1/agents?trait=x402-paid&trait=multichain&trait=${FIXTURE_TRAIT}&per_page=100`,
     });
 
     const idsOf = (r: typeof both): string[] =>
@@ -199,7 +240,7 @@ describe('GET /api/v1/agents', () => {
     guard();
     const response = await app.inject({
       method: 'GET',
-      url: '/api/v1/agents?q=highest%20APY&per_page=100',
+      url: `/api/v1/agents?q=highest%20APY&trait=${FIXTURE_TRAIT}&per_page=100`,
     });
 
     const ids = response
@@ -210,10 +251,13 @@ describe('GET /api/v1/agents', () => {
 
   it('still returns agents whose metadata never resolved, and can exclude them', async () => {
     guard();
-    const all = await app.inject({ method: 'GET', url: '/api/v1/agents?protocol=mcp&per_page=100' });
+    const all = await app.inject({
+      method: 'GET',
+      url: `/api/v1/agents?protocol=mcp&trait=${FIXTURE_TRAIT}&per_page=100`,
+    });
     const resolvedOnly = await app.inject({
       method: 'GET',
-      url: '/api/v1/agents?protocol=mcp&resolved_only=true&per_page=100',
+      url: `/api/v1/agents?protocol=mcp&resolved_only=true&trait=${FIXTURE_TRAIT}&per_page=100`,
     });
 
     const idsOf = (r: typeof all): string[] =>
@@ -221,6 +265,46 @@ describe('GET /api/v1/agents', () => {
 
     expect(idsOf(all)).toContain(YIELD_AGENT);
     expect(idsOf(resolvedOnly)).not.toContain(YIELD_AGENT);
+  });
+
+  it('ranks by agent id, so a missing timestamp cannot outrank a newer agent', async () => {
+    /*
+     * The bug this pins. Agent 3 is the newest and has no `registered_at`; agents 1 and 2
+     * are older and do. Ordering by `registered_at ... nulls last` put agent 3 last, which
+     * in production meant 7,458 genuinely newer agents sorted behind one stale replay
+     * window on both the discovery grid and the landing page.
+     *
+     * Ids are minted sequentially, so id order *is* registration order, for every row and
+     * with no nulls.
+     */
+    guard();
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/agents?sort=registered_at&direction=desc&trait=${FIXTURE_TRAIT}&per_page=100`,
+    });
+
+    const ids = response
+      .json<{ data: { identity: { id: string } }[] }>()
+      .data.map((agent) => agent.identity.id);
+
+    expect(ids).toEqual([NEWEST, YIELD_AGENT, REBALANCER]);
+  });
+
+  it('never serves a blank name or description', async () => {
+    /*
+     * Agent 3 stores `name: ''` and `description: '   '`, which is 529 rows in production.
+     * A blank name rendered an empty heading, because `?? fallback` does not catch it.
+     */
+    guard();
+    const response = await app.inject({ method: 'GET', url: `/api/v1/agents/${NEWEST}` });
+
+    const { profile } = response.json<{
+      data: { profile: { name: string; description: string | null } };
+    }>().data;
+
+    expect(profile.name).toBe('Agent #3');
+    // Null, not an empty string, so the UI's "no description" state is reachable.
+    expect(profile.description).toBeNull();
   });
 
   it('rejects an oversized page with a field-level error', async () => {
