@@ -8,6 +8,13 @@
       "when": 1787856440993,
       "tag": "0000_lucky_wildside",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788087282771,
+      "tag": "0001_slimy_jane_foster",
+      "breakpoints": true
     }
   ]
 }

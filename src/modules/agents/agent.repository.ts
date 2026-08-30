@@ -25,7 +25,7 @@ import type {
   AgentSummary,
   ProtocolTag,
 } from './agent.types.js';
-import { safeImageUrl } from './agent.types.js';
+import { safeImageUrl, toAgentEndpoints, toDeclaredBoolean, toTrustModels } from './agent.types.js';
 
 /**
  * All SQL for the agents domain lives here.
@@ -98,14 +98,25 @@ export interface AgentRepository {
   findById(id: string): Promise<AgentSummary | null>;
   upsertMany(payloads: AgentWritePayload[]): Promise<number>;
   /**
-   * Agents awaiting a registration-file fetch, oldest id first.
+   * Agents awaiting a registration-file fetch, least-attempted first.
    *
-   * Ordered by id so repeated passes make forward progress over the same backlog
-   * deterministically instead of resampling the same rows.
+   * Fewest attempts first so a pass cannot spend itself re-fetching URIs that have
+   * already refused it many times. Newest id first within an attempt count because that
+   * is the order `/discover` shows by default, so the agents a visitor sees first are the
+   * ones that get a description first.
    */
   findPendingMetadata(limit: number): Promise<PendingMetadataAgent[]>;
   /** How many agents still have no resolved registration file. */
   countPendingMetadata(): Promise<number>;
+  /**
+   * Records that a fetch was attempted and did not produce a document.
+   *
+   * Separate from `upsertMany` because nothing about the agent changed: this only moves
+   * the row further back in the retry queue. Returning it to the pass untouched, as an
+   * earlier version did, meant the next pass selected the same dead rows and the backlog
+   * could not drain.
+   */
+  recordMetadataFailures(ids: string[], attemptedAt: Date): Promise<void>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -120,6 +131,14 @@ function toSummary(
 ): AgentSummary {
   const summaryValue = reputationRow?.summaryValue ?? null;
   const summaryDecimals = reputationRow?.summaryDecimals ?? null;
+
+  /*
+   * Read out of the stored registration file rather than kept in their own columns.
+   * These fields were already being persisted inside `raw_metadata`, so surfacing them
+   * needs no migration and no re-ingestion: every agent whose metadata has already
+   * resolved gains its endpoints the moment this ships.
+   */
+  const metadata = row.rawMetadata as Record<string, unknown> | null;
 
   return {
     identity: {
@@ -138,13 +157,11 @@ function toSummary(
       capabilities: row.capabilities,
       protocolTag: row.protocolTag as ProtocolTag,
       traitTags: row.traitTags,
-      /*
-       * Read out of the stored registration file rather than kept in its own column.
-       * The field was already being persisted inside `raw_metadata`, so surfacing it
-       * needs no migration and no re-ingestion — 163,888 agents gain artwork the moment
-       * this ships.
-       */
-      imageUrl: safeImageUrl((row.rawMetadata as { image?: unknown } | null)?.image),
+      imageUrl: safeImageUrl(metadata?.image),
+      endpoints: toAgentEndpoints(metadata?.services),
+      trustModels: toTrustModels(metadata?.supportedTrust),
+      x402Support: toDeclaredBoolean(metadata?.x402Support),
+      declaredActive: toDeclaredBoolean(metadata?.active),
       metadataResolvedAt: row.metadataResolvedAt,
     },
     categories: categoryRows
@@ -391,7 +408,7 @@ export function createAgentRepository(db: Database): AgentRepository {
         })
         .from(agents)
         .where(pendingMetadata())
-        .orderBy(asc(agents.agentId))
+        .orderBy(asc(agents.metadataAttempts), desc(agents.agentId))
         .limit(limit);
 
       // The URI is non-null by construction of the predicate; this narrows the type
@@ -404,6 +421,18 @@ export function createAgentRepository(db: Database): AgentRepository {
     async countPendingMetadata() {
       const [row] = await db.select({ value: count() }).from(agents).where(pendingMetadata());
       return row?.value ?? 0;
+    },
+
+    async recordMetadataFailures(ids, attemptedAt) {
+      if (ids.length === 0) return;
+
+      await db
+        .update(agents)
+        .set({
+          metadataAttempts: sql`${agents.metadataAttempts} + 1`,
+          metadataAttemptedAt: attemptedAt,
+        })
+        .where(inArray(agents.id, ids));
     },
   };
 }

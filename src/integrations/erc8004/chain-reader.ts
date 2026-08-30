@@ -10,8 +10,13 @@ import { bsc } from 'viem/chains';
 import type { Logger } from 'pino';
 import type { Env } from '../../config/env.js';
 import { upstreamUnavailable } from '../../shared/errors.js';
-import type { AgentReputation } from '../../modules/agents/agent.types.js';
-import { safeImageUrl } from '../../modules/agents/agent.types.js';
+import type { AgentProfile, AgentReputation } from '../../modules/agents/agent.types.js';
+import {
+  safeImageUrl,
+  toAgentEndpoints,
+  toDeclaredBoolean,
+  toTrustModels,
+} from '../../modules/agents/agent.types.js';
 import type {
   AgentSource,
   AgentSourceCursor,
@@ -150,6 +155,34 @@ export interface ChainAgentSource extends AgentSource {
   registryName(): Promise<string>;
   /** Resolves the block a sync should start from, clamped to what the node serves. */
   resolveStartBlock(preferredFrom: number): Promise<{ fromBlock: number; clamped: boolean }>;
+}
+
+/**
+ * The profile of an agent whose registration file KATTEGAT does not have.
+ *
+ * Three separate paths reach this state and must be indistinguishable downstream: no
+ * `agentURI` on chain, a deferred network fetch, and a fetch that failed. They differ in
+ * whether they count as a failure, which the caller records, but not in what is known
+ * about the agent, which is nothing beyond its on-chain identity.
+ *
+ * One helper rather than three literals because they drifted apart the moment the profile
+ * grew fields: the deferred path would have kept an old shape and quietly served agents
+ * missing their endpoints.
+ */
+function unresolvedProfile(agentId: number): AgentProfile {
+  return {
+    name: `Agent #${String(agentId)}`,
+    description: null,
+    capabilities: [],
+    protocolTag: 'unconfigured',
+    traitTags: [],
+    imageUrl: null,
+    endpoints: [],
+    trustModels: [],
+    x402Support: null,
+    declaredActive: null,
+    metadataResolvedAt: null,
+  };
 }
 
 export function createChainReader({ env, logger }: ChainReaderOptions): ChainAgentSource {
@@ -319,15 +352,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
             return {
               agent: {
                 identity,
-                profile: {
-                  name: `Agent #${String(numericId)}`,
-                  description: null,
-                  capabilities: [],
-                  protocolTag: 'unconfigured' as const,
-                  traitTags: [],
-                  imageUrl: null,
-                  metadataResolvedAt: null,
-                },
+                profile: unresolvedProfile(numericId),
                 rawMetadata: null,
               },
               failure: { id, reason: 'no agentURI set on chain' },
@@ -353,15 +378,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
             return {
               agent: {
                 identity,
-                profile: {
-                  name: `Agent #${String(numericId)}`,
-                  description: null,
-                  capabilities: [],
-                  protocolTag: 'unconfigured' as const,
-                  traitTags: [],
-                  imageUrl: null,
-                  metadataResolvedAt: null,
-                },
+                profile: unresolvedProfile(numericId),
                 rawMetadata: null,
               },
               // Not a failure. Nothing has been attempted yet, and the backlog pass
@@ -386,6 +403,10 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
                   protocolTag: registration.protocolTag,
                   traitTags: registration.traitTags,
                   imageUrl: safeImageUrl(registration.file.image),
+                  endpoints: toAgentEndpoints(registration.file.services),
+                  trustModels: toTrustModels(registration.file.supportedTrust),
+                  x402Support: toDeclaredBoolean(registration.file.x402Support),
+                  declaredActive: toDeclaredBoolean(registration.file.active),
                   metadataResolvedAt: new Date(),
                 },
                 rawMetadata: registration.file,
@@ -401,15 +422,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
             return {
               agent: {
                 identity,
-                profile: {
-                  name: `Agent #${String(numericId)}`,
-                  description: null,
-                  capabilities: [],
-                  protocolTag: 'unconfigured' as const,
-                  traitTags: [],
-                  imageUrl: null,
-                  metadataResolvedAt: null,
-                },
+                profile: unresolvedProfile(numericId),
                 rawMetadata: null,
               },
               failure: { id, reason },

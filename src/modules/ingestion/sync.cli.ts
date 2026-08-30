@@ -34,6 +34,15 @@ import {
  * background timer.
  */
 
+/**
+ * Consecutive zero-resolve metadata passes tolerated before `--loop` gives up.
+ *
+ * Above one, because one barren pass is expected: parts of the backlog are dead hosts and
+ * skipping past them is progress. Low, because the backlog spans thousands of unrelated
+ * hosts, so several passes failing in a row points at our end rather than theirs.
+ */
+const MAX_BARREN_PASSES = 5;
+
 function numericFlag(name: string): number | undefined {
   const index = process.argv.indexOf(name);
   if (index === -1) return undefined;
@@ -79,7 +88,7 @@ async function main(): Promise<void> {
       const requestStop = () => {
         if (stopping) return;
         stopping = true;
-        logger.warn('stop requested — finishing the current pass, then saving progress');
+        logger.warn('stop requested, finishing the current pass then saving progress');
       };
       process.once('SIGINT', requestStop);
       process.once('SIGTERM', requestStop);
@@ -97,6 +106,7 @@ async function main(): Promise<void> {
         let resolved = 0;
         let failed = 0;
         let passes = 0;
+        let barrenPasses = 0;
 
         for (;;) {
           const result = await resolveMetadataBacklog({
@@ -129,15 +139,21 @@ async function main(): Promise<void> {
             return;
           }
 
+          barrenPasses = result.resolved === 0 ? barrenPasses + 1 : 0;
+
           /*
-           * A pass that resolved nothing but attempted plenty means every host in that
-           * slice is failing. Continuing would spin through the whole backlog re-failing,
-           * so stop and say so rather than burning hours to no effect.
+           * A single barren pass is normal: some slices of the backlog are genuinely dead
+           * hosts, and the pass still made progress by counting their attempts, which sends
+           * them to the back of the queue so the next pass reaches different rows.
+           *
+           * A run of them means something broader is wrong, most likely our own network,
+           * because the backlog spans thousands of independent hosts and they do not all
+           * fail at once. Stop and say so rather than spending hours confirming it.
            */
-          if (result.resolved === 0) {
+          if (barrenPasses >= MAX_BARREN_PASSES) {
             logger.warn(
-              { attempted: result.attempted, remaining: result.remaining },
-              'metadata pass resolved nothing — stopping rather than looping over failures',
+              { barrenPasses, attempted: result.attempted, remaining: result.remaining },
+              'metadata resolved nothing across consecutive passes, stopping',
             );
             process.stdout.write(
               `${JSON.stringify(

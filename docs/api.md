@@ -49,18 +49,18 @@ readiness. Returns `503` only when the database is unreachable.
 
 Paginated discovery.
 
-| Parameter        | Type                                      | Notes                                        |
-| ---------------- | ----------------------------------------- | -------------------------------------------- |
-| `category`       | enum                                      | `rebalancing`, `grid-trading`, `yield-optimization`, `health-factor-monitoring`, `uncategorized` |
-| `protocol`       | enum                                      | `a2a`, `mcp`, `http-api`, `custom`, `unconfigured` |
-| `q`              | string                                    | Free text over name and description          |
-| `trait`          | string, repeatable                        | `?trait=x402-paid&trait=multichain` requires **both** |
-| `resolved_only`  | `true` \| `false`                         | Exclude agents whose registration file never resolved |
-| `min_confidence` | 0–1                                       | Applied together with `category`             |
-| `sort`           | `registered_at` \| `reputation` \| `name` \| `feedback` | Default `registered_at`       |
-| `direction`      | `asc` \| `desc`                           | Default `desc`                               |
-| `page`           | int ≥ 1                                   | Default 1                                    |
-| `per_page`       | 1–100                                     | Default 24                                   |
+| Parameter        | Type                                                    | Notes                                                                                            |
+| ---------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `category`       | enum                                                    | `rebalancing`, `grid-trading`, `yield-optimization`, `health-factor-monitoring`, `uncategorized` |
+| `protocol`       | enum                                                    | `a2a`, `mcp`, `http-api`, `custom`, `unconfigured`                                               |
+| `q`              | string                                                  | Free text over name and description                                                              |
+| `trait`          | string, repeatable                                      | `?trait=x402-paid&trait=multichain` requires **both**                                            |
+| `resolved_only`  | `true` \| `false`                                       | Exclude agents whose registration file never resolved                                            |
+| `min_confidence` | 0–1                                                     | Applied together with `category`                                                                 |
+| `sort`           | `registered_at` \| `reputation` \| `name` \| `feedback` | Default `registered_at`                                                                          |
+| `direction`      | `asc` \| `desc`                                         | Default `desc`                                                                                   |
+| `page`           | int ≥ 1                                                 | Default 1                                                                                        |
+| `per_page`       | 1–100                                                   | Default 24                                                                                       |
 
 Response element:
 
@@ -82,6 +82,19 @@ Response element:
     "capabilities": ["aegis", "ai", "automation"],
     "protocol_tag": "a2a",
     "trait_tags": ["declared-active"],
+    "image_url": "https://…/avatar.png",
+    "endpoints": [
+      {
+        "label": "A2A",
+        "value": "https://…/.well-known/agent-card.json",
+        "url": "https://…/.well-known/agent-card.json",
+        "kind": "a2a",
+        "version": "0.3.0"
+      }
+    ],
+    "trust_models": ["reputation"],
+    "x402_support": false,
+    "declared_active": true,
     "metadata_resolved_at": "2026-08-27T18:48:25.954Z"
   },
   "categories": [
@@ -101,8 +114,20 @@ Notes for consumers:
 
 - `id` is `<chainId>:<agentId>` and is what every other route takes.
 - `metadata_resolved_at: null` means the off-chain document could not be resolved.
-  The agent is real and its identity is verified — render a partial state, do not
-  hide it.
+  The agent is real and its identity is verified, so render a partial state rather than
+  hiding it.
+- `endpoints` is where the agent can actually be reached, from the `services` array of
+  its registration file. Empty means the agent declared none, which is a real state and
+  matches `protocol_tag: "unconfigured"`.
+  - `value` is the endpoint exactly as published and is what to display. Not all of them
+    are URLs: CAIP-10 contract references and `mcp://` both occur.
+  - `url` is set only when `value` is an absolute `https:` URL. **Use `url` for an
+    `href`, never `value`.** These strings originate on chain from whoever registered the
+    agent, and the filter is applied here so no client has to remember to.
+- `x402_support` and `declared_active` are three-state. `null` means the operator did not
+  say, which is distinct from a declared `false`.
+- `trust_models` is passed through in the operator's own wording, including values outside
+  the spec, because normalising them would misreport what was declared.
 - `categories` always has at least one entry, and exactly one `is_primary`.
 - `signals` is the evidence for the assignment. Show it; that is the point.
 - `reputation` is a cached snapshot. Use the reputation endpoint for a live figure.
@@ -158,7 +183,7 @@ when non-empty.
 }
 ```
 
-Counts are of *primary* category only, so they sum to the number of agents rather
+Counts are of _primary_ category only, so they sum to the number of agents rather
 than double-counting multi-category agents. Empty categories are still returned:
 hiding a category the moment it empties is exactly when a user most needs to see
 "nothing here yet".
@@ -168,11 +193,11 @@ hiding a category the moment it empties is exactly when a user most needs to see
 Natural-language search. Resolves a plain-language query into the same filters
 `GET /agents` accepts, and returns the interpretation with the results.
 
-| Parameter  | Type       | Notes                     |
-| ---------- | ---------- | ------------------------- |
-| `q`        | string     | Required, 1–300 characters |
-| `page`     | int ≥ 1    | Default 1                 |
-| `per_page` | 1–100      | Default 24                |
+| Parameter  | Type    | Notes                      |
+| ---------- | ------- | -------------------------- |
+| `q`        | string  | Required, 1–300 characters |
+| `page`     | int ≥ 1 | Default 1                  |
+| `per_page` | 1–100   | Default 24                 |
 
 ```
 GET /api/v1/search?q=conservative yield agent for stablecoins with a track record
@@ -182,7 +207,10 @@ GET /api/v1/search?q=conservative yield agent for stablecoins with a track recor
 {
   "data": [],
   "meta": {
-    "page": 1, "per_page": 24, "total": 0, "total_pages": 1,
+    "page": 1,
+    "per_page": 24,
+    "total": 0,
+    "total_pages": 1,
     "interpretation": {
       "query": "conservative yield agent for stablecoins with a track record",
       "resolved_by": "rules",
