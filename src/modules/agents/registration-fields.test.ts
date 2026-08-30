@@ -7,6 +7,9 @@ import { safeImageUrl, toAgentEndpoints, toDeclaredBoolean, toTrustModels } from
  * untrusted input that ends up rendered in a visitor's browser.
  */
 
+/** The on-chain facts an endpoint template is filled in from. */
+const CONTEXT = { agentId: 310_018, walletAddress: '0xabc' };
+
 /**
  * These URLs arrive from `agentURI`, which is written on chain by whoever registered the
  * agent, and end up in an `<img src>` in every visitor's browser. That makes this a trust
@@ -89,7 +92,7 @@ describe('toAgentEndpoints', () => {
         endpoint: 'https://bnb-lp.nip.io/.well-known/agent-card.json',
         version: '0.3.0',
       },
-    ]);
+    ], CONTEXT);
 
     expect(endpoint).toEqual({
       label: 'A2A',
@@ -104,7 +107,7 @@ describe('toAgentEndpoints', () => {
     // A CAIP-10 reference to another registry contract. Real, and not a URL.
     const [endpoint] = toAgentEndpoints([
       { name: 'bap578', endpoint: 'eip155:56:0x15b15DF2fFFF6653C21C11b93fB8A7718CE854Ce/10711' },
-    ]);
+    ], CONTEXT);
 
     expect(endpoint?.value).toBe('eip155:56:0x15b15DF2fFFF6653C21C11b93fB8A7718CE854Ce/10711');
     expect(endpoint?.url).toBeNull();
@@ -112,7 +115,7 @@ describe('toAgentEndpoints', () => {
   });
 
   it('never produces a link for a javascript: endpoint', () => {
-    const [endpoint] = toAgentEndpoints([{ name: 'web', endpoint: 'javascript:alert(1)' }]);
+    const [endpoint] = toAgentEndpoints([{ name: 'web', endpoint: 'javascript:alert(1)' }], CONTEXT);
 
     // Still shown, because hiding it would hide what the operator actually published.
     expect(endpoint?.value).toBe('javascript:alert(1)');
@@ -120,7 +123,7 @@ describe('toAgentEndpoints', () => {
   });
 
   it('refuses to link plain http rather than upgrading it', () => {
-    const [endpoint] = toAgentEndpoints([{ name: 'web', endpoint: 'http://example.com' }]);
+    const [endpoint] = toAgentEndpoints([{ name: 'web', endpoint: 'http://example.com' }], CONTEXT);
 
     expect(endpoint?.url).toBeNull();
     // Still recognisably a web endpoint, so it groups with the others.
@@ -136,27 +139,27 @@ describe('toAgentEndpoints', () => {
       { name: 'web', endpoint: 'https://example.com' },
       // Unlabelled A2A card, recognised from the well-known path alone.
       { endpoint: 'https://example.com/.well-known/agent-card.json' },
-    ]).map((endpoint) => endpoint.kind);
+    ], CONTEXT).map((endpoint) => endpoint.kind);
 
     expect(kinds).toEqual(['mcp', 'mcp', 'wallet', 'social', 'web', 'a2a']);
   });
 
   it('drops entries with nothing to show', () => {
     // `services: [{}]` appears verbatim in the registry. An empty row communicates nothing.
-    expect(toAgentEndpoints([{}, { name: 'web' }, { endpoint: '   ' }])).toEqual([]);
+    expect(toAgentEndpoints([{}, { name: 'web' }, { endpoint: '   ' }], CONTEXT)).toEqual([]);
   });
 
   it('returns an empty list for absent or non-array input', () => {
-    expect(toAgentEndpoints(undefined)).toEqual([]);
-    expect(toAgentEndpoints(null)).toEqual([]);
-    expect(toAgentEndpoints('https://example.com')).toEqual([]);
+    expect(toAgentEndpoints(undefined, CONTEXT)).toEqual([]);
+    expect(toAgentEndpoints(null, CONTEXT)).toEqual([]);
+    expect(toAgentEndpoints('https://example.com', CONTEXT)).toEqual([]);
   });
 
   it('bounds a hostile registration file', () => {
     const long = Array.from({ length: 300 }, () => ({ endpoint: 'https://example.com' }));
-    expect(toAgentEndpoints(long)).toHaveLength(100);
+    expect(toAgentEndpoints(long, CONTEXT)).toHaveLength(100);
 
-    expect(toAgentEndpoints([{ endpoint: `https://e.com/${'a'.repeat(3000)}` }])).toEqual([]);
+    expect(toAgentEndpoints([{ endpoint: `https://e.com/${'a'.repeat(3000)}` }], CONTEXT)).toEqual([]);
   });
 });
 
@@ -188,5 +191,94 @@ describe('toDeclaredBoolean', () => {
   it('does not coerce truthy strings or numbers', () => {
     expect(toDeclaredBoolean('true')).toBeNull();
     expect(toDeclaredBoolean(1)).toBeNull();
+  });
+});
+
+/**
+ * Templated endpoints.
+ *
+ * A third of every endpoint in the registry is a template. Registrars publish one URL per
+ * platform and expect the client to substitute, so linking the published string verbatim
+ * produced 21,780 dead links, each returning `{"error":{"code":"NOT_FOUND"}}`.
+ *
+ * The fixtures are the five distinct templates found in the live registry.
+ */
+describe('toAgentEndpoints, template resolution', () => {
+  it('fills {agentId} from the on-chain id and links the result', () => {
+    /*
+     * Verified against the live host, not assumed: this URL returns HTTP 200 with a card
+     * whose `agentTokenId` is "310018" and whose name matches the registry entry.
+     */
+    const [endpoint] = toAgentEndpoints(
+      [
+        {
+          name: 'A2A',
+          endpoint: 'https://platform-backend.prod.termix.live/api/v1/a2a/agents/{agentId}/card',
+        },
+      ],
+      CONTEXT,
+    );
+
+    expect(endpoint?.url).toBe(
+      'https://platform-backend.prod.termix.live/api/v1/a2a/agents/310018/card',
+    );
+  });
+
+  it('keeps the published template as the value', () => {
+    // The document says what it says. Substitution produces a link, not a new fact.
+    const [endpoint] = toAgentEndpoints(
+      [{ name: 'web', endpoint: 'https://e.com/api/v1/agents/{agentId}/services' }],
+      CONTEXT,
+    );
+
+    expect(endpoint?.value).toBe('https://e.com/api/v1/agents/{agentId}/services');
+  });
+
+  it('fills {wallet} from the declared payment wallet', () => {
+    const [endpoint] = toAgentEndpoints(
+      [{ name: 'positions', endpoint: 'https://agents.topazdex.com/api/positions/{wallet}' }],
+      CONTEXT,
+    );
+
+    expect(endpoint?.url).toBe('https://agents.topazdex.com/api/positions/0xabc');
+  });
+
+  it('refuses to link {wallet} when the agent declared no wallet', () => {
+    // Substituting "null" or "" would build a URL that is confidently wrong.
+    const [endpoint] = toAgentEndpoints(
+      [{ name: 'positions', endpoint: 'https://agents.topazdex.com/api/positions/{wallet}' }],
+      { agentId: 1, walletAddress: null },
+    );
+
+    expect(endpoint?.value).toBe('https://agents.topazdex.com/api/positions/{wallet}');
+    expect(endpoint?.url).toBeNull();
+  });
+
+  it('refuses to link a placeholder it does not recognise', () => {
+    const [endpoint] = toAgentEndpoints(
+      [{ name: 'web', endpoint: 'https://e.com/{somethingElse}/card' }],
+      CONTEXT,
+    );
+
+    expect(endpoint?.url).toBeNull();
+  });
+
+  it('fills every occurrence, not just the first', () => {
+    const [endpoint] = toAgentEndpoints(
+      [{ name: 'web', endpoint: 'https://e.com/{agentId}/x/{agentId}' }],
+      CONTEXT,
+    );
+
+    expect(endpoint?.url).toBe('https://e.com/310018/x/310018');
+  });
+
+  it('still refuses a filled template that is not https', () => {
+    // Resolution does not bypass the scheme check.
+    const [endpoint] = toAgentEndpoints(
+      [{ name: 'web', endpoint: 'http://e.com/{agentId}' }],
+      CONTEXT,
+    );
+
+    expect(endpoint?.url).toBeNull();
   });
 });
