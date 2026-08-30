@@ -158,7 +158,10 @@ function toSummary(
       protocolTag: row.protocolTag as ProtocolTag,
       traitTags: row.traitTags,
       imageUrl: safeImageUrl(metadata?.image),
-      endpoints: toAgentEndpoints(metadata?.services),
+      endpoints: toAgentEndpoints(metadata?.services, {
+        agentId: row.agentId,
+        walletAddress: row.walletAddress,
+      }),
       trustModels: toTrustModels(metadata?.supportedTrust),
       x402Support: toDeclaredBoolean(metadata?.x402Support),
       declaredActive: toDeclaredBoolean(metadata?.active),

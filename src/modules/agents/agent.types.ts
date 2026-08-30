@@ -130,6 +130,29 @@ function endpointKind(label: string, value: string): EndpointKind {
   return 'other';
 }
 
+/** The on-chain facts an endpoint template can be filled in from. */
+export interface EndpointContext {
+  agentId: number;
+  walletAddress: string | null;
+}
+
+/**
+ * Placeholders that appear in published endpoints, and where their value comes from.
+ *
+ * Registrars publish one template per platform rather than a URL per agent, so the
+ * document says `/a2a/agents/{agentId}/card` and expects the client to substitute. 21,780
+ * endpoints carry `{agentId}` and one carries `{wallet}`, which is a third of every
+ * endpoint in the registry, and every one of them 404s if linked verbatim.
+ *
+ * Substituting is resolution, not invention: the value comes from the agent's own on-chain
+ * record, and the result is verifiable. Filling `{agentId}` on agent 310018 returns HTTP
+ * 200 with a card whose `agentTokenId` is `310018` and whose name matches the registry.
+ */
+const ENDPOINT_PLACEHOLDERS: Record<string, (context: EndpointContext) => string | null> = {
+  '{agentId}': (context) => String(context.agentId),
+  '{wallet}': (context) => context.walletAddress,
+};
+
 /**
  * Normalises the `services` array into endpoints worth rendering.
  *
@@ -137,7 +160,7 @@ function endpointKind(label: string, value: string): EndpointKind {
  * files (agent 219 among them), and an empty row communicates nothing. The agent still
  * shows as having no reachable endpoint, which is accurate.
  */
-export function toAgentEndpoints(value: unknown): AgentEndpoint[] {
+export function toAgentEndpoints(value: unknown, context: EndpointContext): AgentEndpoint[] {
   if (!Array.isArray(value)) return [];
 
   const endpoints: AgentEndpoint[] = [];
@@ -154,7 +177,7 @@ export function toAgentEndpoints(value: unknown): AgentEndpoint[] {
     endpoints.push({
       label,
       value: raw,
-      url: safeLinkUrl(raw),
+      url: safeLinkUrl(fillTemplate(raw, context)),
       kind: endpointKind((label ?? '').toLowerCase(), raw.toLowerCase()),
       version: typeof service.version === 'string' ? service.version.trim() || null : null,
     });
@@ -163,8 +186,30 @@ export function toAgentEndpoints(value: unknown): AgentEndpoint[] {
   return endpoints;
 }
 
-/** Passes through absolute `https:` URLs, rejects everything else. See `safeImageUrl`. */
+/** Substitutes every placeholder this agent has a value for. */
+function fillTemplate(endpoint: string, context: EndpointContext): string {
+  if (!endpoint.includes('{')) return endpoint;
+
+  let filled = endpoint;
+  for (const [placeholder, resolve] of Object.entries(ENDPOINT_PLACEHOLDERS)) {
+    const replacement = resolve(context);
+    if (replacement !== null) filled = filled.split(placeholder).join(replacement);
+  }
+
+  return filled;
+}
+
+/**
+ * Passes through absolute `https:` URLs, rejects everything else. See `safeImageUrl`.
+ *
+ * Also rejects anything still holding a placeholder. An unfilled `{...}` means either a
+ * name we do not recognise or one this agent has no value for, and a link built from it
+ * leads nowhere. Better to render the template as plain text and let the visitor see that
+ * the operator published a template.
+ */
 function safeLinkUrl(value: string): string | null {
+  if (value.includes('{') || value.includes('}')) return null;
+
   try {
     return new URL(value).protocol === 'https:' ? value : null;
   } catch {

@@ -403,7 +403,10 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
                   protocolTag: registration.protocolTag,
                   traitTags: registration.traitTags,
                   imageUrl: safeImageUrl(registration.file.image),
-                  endpoints: toAgentEndpoints(registration.file.services),
+                  endpoints: toAgentEndpoints(registration.file.services, {
+                    agentId: numericId,
+                    walletAddress: identity.walletAddress,
+                  }),
                   trustModels: toTrustModels(registration.file.supportedTrust),
                   x402Support: toDeclaredBoolean(registration.file.x402Support),
                   declaredActive: toDeclaredBoolean(registration.file.active),
