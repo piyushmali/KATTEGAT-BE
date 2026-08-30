@@ -217,6 +217,29 @@ function safeLinkUrl(value: string): string | null {
   }
 }
 
+/**
+ * Treats a blank string as an absent value.
+ *
+ * Exists because `??` does not. A registration file that sets `"name": ""` or
+ * `"description": "   "` passed straight through every `?? fallback` in the codebase, so
+ * 321 agents rendered an empty `<h1>` and 529 an empty description paragraph. Absent and
+ * blank mean the same thing to a reader and must reach the UI the same way.
+ */
+export function blankToNull(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed === undefined || trimmed.length === 0 ? null : trimmed;
+}
+
+/**
+ * The name to show for an agent, falling back to its id.
+ *
+ * One helper because three paths build this: discovery, the metadata backlog, and reading a
+ * row back out. They disagreed, which is how blank names reached the page.
+ */
+export function agentDisplayName(name: string | null | undefined, agentId: number): string {
+  return blankToNull(name) ?? `Agent #${String(agentId)}`;
+}
+
 /** Reads `supportedTrust`, keeping the operator's own wording. */
 export function toTrustModels(value: unknown): string[] {
   if (!Array.isArray(value)) return [];

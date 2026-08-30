@@ -25,7 +25,14 @@ import type {
   AgentSummary,
   ProtocolTag,
 } from './agent.types.js';
-import { safeImageUrl, toAgentEndpoints, toDeclaredBoolean, toTrustModels } from './agent.types.js';
+import {
+  agentDisplayName,
+  blankToNull,
+  safeImageUrl,
+  toAgentEndpoints,
+  toDeclaredBoolean,
+  toTrustModels,
+} from './agent.types.js';
 
 /**
  * All SQL for the agents domain lives here.
@@ -152,8 +159,13 @@ function toSummary(
       registeredAt: row.registeredAt,
     },
     profile: {
-      name: row.name,
-      description: row.description,
+      /*
+       * Normalised on read, not just on write, so the 529 rows already holding a blank
+       * name or description are fixed without a migration or a re-fetch. The column keeps
+       * whatever the document said, which is the same principle as `raw_metadata`.
+       */
+      name: agentDisplayName(row.name, row.agentId),
+      description: blankToNull(row.description),
       capabilities: row.capabilities,
       protocolTag: row.protocolTag as ProtocolTag,
       traitTags: row.traitTags,
@@ -252,16 +264,24 @@ export function createAgentRepository(db: Database): AgentRepository {
       case 'registered_at':
       default:
         /*
-         * Agent id is the tiebreaker, not decoration. Agents discovered by the
-         * ID-walk backfill have no `registered_at` — the timestamp lives in a
-         * `Registered` log that path deliberately does not read. Ids are minted
-         * sequentially, so ordering by id is ordering by registration for exactly
-         * those rows, instead of dumping them in an arbitrary heap at the end.
+         * Ordered by agent id, and deliberately not by `registered_at`.
+         *
+         * The id is the better answer to "how recently did this register", not a fallback
+         * for when the timestamp is missing. ERC-8004 mints ids from a sequential counter,
+         * so a lower id registered earlier, always, for every row. It is the same
+         * information as the timestamp and it is never null.
+         *
+         * `registered_at` is only populated for agents found by log replay, which is 466
+         * of 317,476, because the ID-walk backfill does not read the `Registered` event and
+         * free RPC tiers cannot serve enough log history to backfill it. Leading the sort
+         * with `registered_at ... nulls last` therefore ranked by *which ingestion path
+         * found the agent* before ranking by when it registered: those 466 rows are ids
+         * 309,443 to 310,018 from one stale replay window, and they sorted ahead of 7,458
+         * genuinely newer agents. "Recently registered" opened on an agent that was over
+         * seven thousand registrations old, on both the discovery grid and the landing
+         * page's arrivals list.
          */
-        return [
-          sql`${agents.registeredAt} ${sql.raw(direction)} nulls last`,
-          sql`${agents.agentId} ${sql.raw(direction)}`,
-        ];
+        return [sql`${agents.agentId} ${sql.raw(direction)}`];
     }
   }
 
