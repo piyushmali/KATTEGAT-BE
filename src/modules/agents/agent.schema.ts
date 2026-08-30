@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { PROTOCOL_TAGS } from '../../integrations/erc8004/registration-file.js';
 import { AGENT_CATEGORIES } from '../classification/taxonomy.js';
 import { paginationSchema } from '../../shared/http/api.schema.js';
+import { ENDPOINT_KINDS } from './agent.types.js';
 
 /**
  * Wire contract for the agents domain.
@@ -79,12 +80,52 @@ export const agentIdentitySchema = z.object({
   registered_at: z.string().nullable(),
 });
 
+export const agentEndpointSchema = z.object({
+  /** The operator's label for this endpoint, e.g. `A2A`. Null when unset. */
+  label: z.string().nullable(),
+  /**
+   * The endpoint exactly as published on chain.
+   *
+   * Not every endpoint is a URL: some are CAIP-10 contract references, some use
+   * `mcp://`. This field is what the UI displays, so a visitor always sees the real
+   * value rather than a gap where KATTEGAT could not linkify it.
+   */
+  value: z.string(),
+  /**
+   * The same endpoint as a link target, or null when it is not a safe one.
+   *
+   * Only absolute `https:` URLs are offered. The value is untrusted on-chain input and
+   * an `href` is a place where `javascript:` executes, so this filter is server-side and
+   * not left to each client to remember.
+   */
+  url: z.string().nullable(),
+  kind: z.enum(ENDPOINT_KINDS),
+  version: z.string().nullable(),
+});
+
 export const agentProfileSchema = z.object({
   name: z.string(),
   description: z.string().nullable(),
   capabilities: z.array(z.string()),
   protocol_tag: z.string(),
   trait_tags: z.array(z.string()),
+  /**
+   * Where the agent can be reached, from the `services` array of its registration file.
+   *
+   * Empty when it declared none, which is a real state rather than missing data: an
+   * agent with no endpoint has an on-chain identity and nothing listening behind it, and
+   * `protocol_tag` reads `unconfigured` to match.
+   */
+  endpoints: z.array(agentEndpointSchema),
+  /** Trust models the operator declared, in their own wording. */
+  trust_models: z.array(z.string()),
+  /** Whether the agent accepts x402 pay-per-call. Null when it did not say. */
+  x402_support: z.boolean().nullable(),
+  /**
+   * The operator's own claim that the agent is running. A claim, not a measurement.
+   * Null when unstated, which is distinct from a declared `false`.
+   */
+  declared_active: z.boolean().nullable(),
   /**
    * The agent's own artwork, taken from the `image` field of its registration file.
    *

@@ -30,6 +30,10 @@ export function toWireAgent(agent: AgentSummary): AgentSummaryResponse {
       protocol_tag: agent.profile.protocolTag,
       trait_tags: agent.profile.traitTags,
       image_url: agent.profile.imageUrl,
+      endpoints: agent.profile.endpoints,
+      trust_models: agent.profile.trustModels,
+      x402_support: agent.profile.x402Support,
+      declared_active: agent.profile.declaredActive,
       metadata_resolved_at: iso(agent.profile.metadataResolvedAt),
     },
     categories: agent.categories.map((assignment) => ({
