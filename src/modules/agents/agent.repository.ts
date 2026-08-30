@@ -5,6 +5,7 @@ import {
   count,
   desc,
   eq,
+  gt,
   gte,
   ilike,
   inArray,
@@ -22,6 +23,7 @@ import {
 import type {
   AgentCategory,
   AgentCategoryAssignment,
+  AgentReputation,
   AgentSummary,
   ProtocolTag,
 } from './agent.types.js';
@@ -124,6 +126,27 @@ export interface AgentRepository {
    * could not drain.
    */
   recordMetadataFailures(ids: string[], attemptedAt: Date): Promise<void>;
+  /**
+   * Indexed agent ids above `afterAgentId`, ascending.
+   *
+   * Drives the reputation sweep. Reading ids out of our own table rather than counting up
+   * from a cursor means the sweep skips nothing and wastes nothing: the registry has gaps,
+   * and asking the chain about an id we have not indexed spends a call to learn nothing
+   * while risking a foreign-key failure on the write.
+   */
+  findAgentIdsAfter(
+    afterAgentId: number,
+    limit: number,
+  ): Promise<{ id: string; agentId: number }[]>;
+  /**
+   * Writes reputation snapshots for many agents in one statement.
+   *
+   * Distinct from `upsertMany`, which needs a whole agent payload. A sweep has read one
+   * thing about thousands of agents and changed nothing else about them.
+   */
+  saveReputationSnapshots(
+    snapshots: { id: string; reputation: AgentReputation }[],
+  ): Promise<number>;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -456,6 +479,46 @@ export function createAgentRepository(db: Database): AgentRepository {
           metadataAttemptedAt: attemptedAt,
         })
         .where(inArray(agents.id, ids));
+    },
+
+    async findAgentIdsAfter(afterAgentId, limit) {
+      return db
+        .select({ id: agents.id, agentId: agents.agentId })
+        .from(agents)
+        .where(gt(agents.agentId, afterAgentId))
+        .orderBy(asc(agents.agentId))
+        .limit(limit);
+    },
+
+    async saveReputationSnapshots(snapshots) {
+      if (snapshots.length === 0) return 0;
+
+      const rows = snapshots.map((entry) => ({
+        agentId: entry.id,
+        feedbackCount: entry.reputation.feedbackCount,
+        clientCount: entry.reputation.clientCount,
+        summaryValue: entry.reputation.summaryValue,
+        summaryDecimals: entry.reputation.summaryDecimals,
+        source: entry.reputation.source,
+        computedAt: entry.reputation.computedAt,
+      }));
+
+      await db
+        .insert(agentReputation)
+        .values(rows)
+        .onConflictDoUpdate({
+          target: agentReputation.agentId,
+          set: {
+            feedbackCount: sql`excluded.feedback_count`,
+            clientCount: sql`excluded.client_count`,
+            summaryValue: sql`excluded.summary_value`,
+            summaryDecimals: sql`excluded.summary_decimals`,
+            source: sql`excluded.source`,
+            computedAt: sql`excluded.computed_at`,
+          },
+        });
+
+      return rows.length;
     },
   };
 }

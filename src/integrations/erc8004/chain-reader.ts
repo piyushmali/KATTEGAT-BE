@@ -89,6 +89,21 @@ const ID_MULTICALL_CHUNK = 120;
  */
 const ID_MULTICALL_CONCURRENCY = 4;
 
+/**
+ * Agent ids per Multicall3 request when sweeping reputation.
+ *
+ * Four times the id-walk chunk because the payload is a fraction of the size: `getClients`
+ * returns an address array, empty for most agents, against `tokenURI`'s full URI string.
+ *
+ * Measured over 2,000 ids: chunk 200 at concurrency 8 gave 137 ids/sec, chunk 500 at 8 gave
+ * 168, chunk 1,000 at 4 gave 164. Zero failures at all three. 500/8 it is, which puts a
+ * full 317,476-agent sweep at about 31 minutes.
+ */
+const REPUTATION_MULTICALL_CHUNK = 500;
+
+/** Reputation chunks in flight at once. See {@link REPUTATION_MULTICALL_CHUNK}. */
+const REPUTATION_MULTICALL_CONCURRENCY = 8;
+
 export interface ChainReaderOptions {
   env: Env;
   logger: Logger;
@@ -143,6 +158,21 @@ export interface ChainAgentSource extends AgentSource {
    * the whole registry, where log replay is bounded by RPC log retention.
    */
   discoverByIdRange(fromId: number, toId: number, options?: IdRangeOptions): Promise<DiscoveryPage>;
+  /**
+   * Reputation for many agents at once, over Multicall3.
+   *
+   * The per-agent `reputation` read costs two sequential round trips, which is right for a
+   * profile view and hopeless for a catalogue: at ~1.4s each, 317,476 agents would take
+   * over nine days. Reputation was therefore only ever read when someone opened a profile,
+   * leaving 130 of 317,476 agents scored and the "highest reputation" and "most feedback"
+   * sorts ranking almost nothing.
+   *
+   * Batched, the same sweep measures 168 ids/sec, or about 31 minutes.
+   *
+   * Returns an entry only for ids the registry answered for. A missing id is unknown, not
+   * zero, and the caller must not record it as scored.
+   */
+  reputationBatch(agentIds: number[]): Promise<Map<number, AgentReputation>>;
   /** Resolves one deferred registration file. Used by the metadata backlog pass. */
   resolveRegistration(agentUri: string): Promise<ResolvedProfile>;
   /**
@@ -742,6 +772,153 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
     }
   }
 
+  async function reputationBatch(agentIds: number[]): Promise<Map<number, AgentReputation>> {
+    const found = new Map<number, AgentReputation>();
+    if (agentIds.length === 0) return found;
+
+    const now = new Date();
+
+    /*
+     * Phase one: who has left feedback.
+     *
+     * `getClients` is the cheap filter and it has to run first regardless, because
+     * `getSummary` reverts with "clientAddresses required" on an empty list. It returns an
+     * address array, so a no-feedback agent costs 64 bytes and the batches stay small.
+     */
+    const clientsById = new Map<number, readonly string[]>();
+
+    for (let i = 0; i < agentIds.length; i += REPUTATION_MULTICALL_CHUNK * REPUTATION_MULTICALL_CONCURRENCY) {
+      const wave: number[][] = [];
+      for (
+        let j = i;
+        j < Math.min(agentIds.length, i + REPUTATION_MULTICALL_CHUNK * REPUTATION_MULTICALL_CONCURRENCY);
+        j += REPUTATION_MULTICALL_CHUNK
+      ) {
+        wave.push(agentIds.slice(j, j + REPUTATION_MULTICALL_CHUNK));
+      }
+
+      const settled = await Promise.all(
+        wave.map(async (slice) => {
+          try {
+            return await client.multicall({
+              allowFailure: true,
+              contracts: slice.map((agentId) => ({
+                address: reputationAddress,
+                abi: reputationRegistryAbi,
+                functionName: 'getClients' as const,
+                args: [BigInt(agentId)] as const,
+              })),
+            });
+          } catch (error) {
+            /*
+             * A whole chunk failing is a transport problem, not an answer about these
+             * agents. Dropped rather than thrown: one bad chunk must not abandon a sweep
+             * that has already advanced its cursor past thousands of ids, and the next run
+             * reaches these again because nothing was recorded for them.
+             */
+            logger.warn(
+              { err: error, from: slice[0], count: slice.length },
+              'reputation getClients chunk failed; those ids stay unswept',
+            );
+            return null;
+          }
+        }),
+      );
+
+      settled.forEach((results, index) => {
+        const slice = wave[index];
+        if (results === null || slice === undefined) return;
+
+        results.forEach((result, offset) => {
+          const agentId = slice[offset];
+          if (agentId === undefined || result.status !== 'success') return;
+          clientsById.set(agentId, result.result);
+        });
+      });
+    }
+
+    /*
+     * Every id the registry answered for is now known, including the ones with nothing.
+     * Recording those matters: "swept, no feedback" is a fact, and it is what lets the UI
+     * say "no feedback yet" as a finding rather than as a gap in our index.
+     */
+    const withFeedback: number[] = [];
+    for (const [agentId, clients] of clientsById) {
+      if (clients.length === 0) {
+        found.set(agentId, {
+          feedbackCount: 0,
+          clientCount: 0,
+          summaryValue: null,
+          summaryDecimals: null,
+          score: null,
+          source: SOURCE_NAME,
+          computedAt: now,
+        });
+      } else {
+        withFeedback.push(agentId);
+      }
+    }
+
+    /*
+     * Phase two: the summary, for the few that have one. Measured across the registry this
+     * is a small minority and it thins out fast, from 27% of the first thousand ids to
+     * nothing at all beyond 150,000, so the second phase costs far less than the first.
+     */
+    for (let i = 0; i < withFeedback.length; i += REPUTATION_MULTICALL_CHUNK) {
+      const slice = withFeedback.slice(i, i + REPUTATION_MULTICALL_CHUNK);
+
+      let results;
+      try {
+        results = await client.multicall({
+          allowFailure: true,
+          contracts: slice.map((agentId) => ({
+            address: reputationAddress,
+            abi: reputationRegistryAbi,
+            functionName: 'getSummary' as const,
+            args: [BigInt(agentId), clientsById.get(agentId) ?? [], '', ''] as const,
+          })),
+        });
+      } catch (error) {
+        logger.warn(
+          { err: error, from: slice[0], count: slice.length },
+          'reputation getSummary chunk failed; those ids stay unswept',
+        );
+        // Drop them from the result entirely: we know they have clients, so recording a
+        // zero would be worse than recording nothing.
+        for (const agentId of slice) found.delete(agentId);
+        continue;
+      }
+
+      results.forEach((result, offset) => {
+        const agentId = slice[offset];
+        if (agentId === undefined) return;
+
+        if (result.status !== 'success') {
+          found.delete(agentId);
+          return;
+        }
+
+        const [count, summaryValue, summaryDecimals] = result.result;
+        const feedbackCount = Number(count);
+        const decimals = Number(summaryDecimals);
+        const rawValue = Number(summaryValue);
+        const hasFeedback = feedbackCount > 0;
+
+        found.set(agentId, {
+          feedbackCount,
+          clientCount: clientsById.get(agentId)?.length ?? 0,
+          summaryValue: hasFeedback ? rawValue : null,
+          summaryDecimals: hasFeedback ? decimals : null,
+          score: hasFeedback ? decodeScore(rawValue, decimals) : null,
+          source: SOURCE_NAME,
+          computedAt: now,
+        });
+      });
+    }
+
+    return found;
+  }
+
   async function registryName(): Promise<string> {
     return client.readContract({
       address: identityAddress,
@@ -812,6 +989,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
     latestBlock,
     discover,
     reputation,
+    reputationBatch,
     oldestAvailableLogBlock,
     registryName,
     resolveStartBlock,

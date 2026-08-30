@@ -22,6 +22,14 @@ export const ecosystemStatsSchema = z.object({
   feedback_records: z.number().int(),
   /** Agents with at least one feedback entry. */
   rated_agents: z.number().int(),
+  /**
+   * Agents whose reputation has been read from the registry.
+   *
+   * The denominator for `feedback_records` and `rated_agents`. Without it a client cannot
+   * tell "nobody has rated these agents" from "we have not looked yet", and those are
+   * different claims.
+   */
+  reputation_swept: z.number().int(),
   /** Distinct owner addresses. */
   owner_count: z.number().int(),
   /** Last successful ingestion run, or null if none has completed. */

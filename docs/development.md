@@ -43,6 +43,8 @@ pnpm sync:agents --full                 # re-scan the widest log window availabl
 pnpm sync:agents --backfill             # walk agent ids — reaches the whole registry
 pnpm sync:agents --backfill --limit 400
 pnpm sync:agents --backfill --loop      # repeat until the registry is exhausted
+pnpm sync:agents --metadata --loop      # fetch the registration files discovery deferred
+pnpm sync:agents --reputation --loop    # read the ReputationRegistry for every agent
 ```
 
 **Which one to run.** Incremental replays logs and is bounded by the endpoint's log
@@ -52,8 +54,16 @@ limit, and is the only way to reach the registry's ~310k historical agents. Run
 `--backfill --loop` once to build a catalogue, then plain `pnpm sync:agents` on a
 schedule to stay current.
 
-Backfill is resumable under its own cursor, so interrupting `--loop` loses at most one
-batch. Its cost is metadata fetching, not RPC: expect a few hundred agents per minute.
+`--metadata` and `--reputation` are separate modes because each is bound by something
+different, and folding them into discovery would make the slowest one set the pace for
+all three. Discovery is bound by RPC round trips and finishes in minutes; the metadata
+backlog waits on other people's web servers; the reputation sweep is bound by RPC again
+but over 317,476 agents, at a measured 168 ids/sec, so about half an hour.
+
+**Only one ingestion process runs at a time.** All modes take the same Postgres advisory
+lock, and a second one exits with `{"skipped":"ingestion already running"}` rather than
+racing the cursor. Each mode has its own cursor and is resumable, so interrupting a
+`--loop` loses at most one batch.
 
 A process rather than an in-server interval: ingestion and serving have different
 failure modes and scaling needs, and a cron entry is easier to observe than a
