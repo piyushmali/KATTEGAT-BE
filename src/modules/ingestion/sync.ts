@@ -1,7 +1,7 @@
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { Logger } from 'pino';
 import type { Env } from '../../config/env.js';
-import type { Database } from '../../infrastructure/database/client.js';
+import type { Database, DatabaseHandle } from '../../infrastructure/database/client.js';
 import { syncState } from '../../infrastructure/database/schema.js';
 import type { ChainAgentSource } from '../../integrations/erc8004/chain-reader.js';
 import { classifyAgent } from '../classification/classifier.js';
@@ -60,6 +60,12 @@ const DEFAULT_MAX_REPUTATION_READS = 60;
  * work, which matters because the full walk is a multi-hour job.
  */
 const BACKFILL_BATCH = 1_200;
+
+/**
+ * Shared by every ingestion mode. Arbitrary but fixed: any constant works as long as all
+ * of them agree, since the point is that they exclude each other.
+ */
+const INGESTION_LOCK_KEY = 8_004_056;
 
 /** Deferred registration files fetched per backlog pass. */
 const METADATA_BACKLOG_BATCH = 240;
@@ -122,27 +128,24 @@ export interface MetadataBacklogResult {
  * case.
  */
 export async function withIngestionLock<T>(
-  db: Database,
+  handle: DatabaseHandle,
   logger: Logger,
   work: () => Promise<T>,
 ): Promise<T | null> {
-  // Arbitrary but fixed: any constant works as long as every ingestion path shares it.
-  const LOCK_KEY = 8_004_056;
+  /*
+   * Taken on a reserved connection, not through the pool. See
+   * `DatabaseHandle.withAdvisoryLock`: routing this through `db.execute` acquired the lock
+   * on a borrowed connection that the pool closed twenty seconds later, which released the
+   * lock while the job still believed it held one. Two ingestion processes ran side by side
+   * under exactly the protection that was supposed to stop them.
+   */
+  const result = await handle.withAdvisoryLock(INGESTION_LOCK_KEY, work);
 
-  const [acquired] = await db.execute<{ locked: boolean }>(
-    sql`select pg_try_advisory_lock(${LOCK_KEY}) as locked`,
-  );
-
-  if (acquired?.locked !== true) {
-    logger.warn('another ingestion process holds the lock — exiting rather than racing its cursor');
-    return null;
+  if (result === null) {
+    logger.warn('another ingestion process holds the lock, exiting rather than racing its cursor');
   }
 
-  try {
-    return await work();
-  } finally {
-    await db.execute(sql`select pg_advisory_unlock(${LOCK_KEY})`);
-  }
+  return result;
 }
 
 export async function resolveMetadataBacklog(
@@ -244,6 +247,144 @@ export async function resolveMetadataBacklog(
 
   logger.info(result, 'metadata backlog pass complete');
   return result;
+}
+
+/** Agents whose reputation is read per sweep pass. */
+const REPUTATION_SWEEP_BATCH = 2_000;
+
+export interface ReputationSweepResult {
+  mode: 'reputation';
+  fromAgentId: number;
+  toAgentId: number;
+  /** Ids the registry answered for, including the ones with nothing to report. */
+  swept: number;
+  /** Of those, how many carry at least one piece of client feedback. */
+  withFeedback: number;
+  /** Ids the registry did not answer for. They stay unswept and are retried. */
+  unanswered: number;
+  remaining: number;
+}
+
+/**
+ * Reads reputation for the whole catalogue.
+ *
+ * Reputation was only ever read when someone opened a profile, which left 130 of 317,476
+ * agents scored. The consequence was not a blank panel, it was two sort options on the
+ * marketplace ranking almost nothing: "highest reputation" and "most feedback" ordered a
+ * set of 130 and put the other 317,346 behind them under `nulls last`. The landing page's
+ * feedback figure had the same problem, and had to caveat itself as counting only what
+ * KATTEGAT happened to have looked at.
+ *
+ * The per-agent read costs two sequential round trips, so at ~1.4s each the catalogue would
+ * take over nine days. `reputationBatch` does the same work over Multicall3 at a measured
+ * 168 ids/sec: about 31 minutes.
+ *
+ * Ids come from our own table rather than a counter, so gaps in the registry cost nothing
+ * and every write has an agent row to point at. Progress is stored under its own cursor,
+ * which is what lets a 31-minute job run inside a 15-minute CI timeout.
+ *
+ * Records agents with no feedback as well as those with some. That is the point: "swept, no
+ * feedback" is a finding, and it is what lets the UI say "no feedback yet" as a fact rather
+ * than as an admission that nobody checked.
+ */
+export async function sweepReputation(
+  options: SyncOptions & { limit?: number },
+): Promise<ReputationSweepResult> {
+  const { db, logger, source, repository } = options;
+  const cursorId = `${String(source.chainId)}:reputation:sweep`;
+  const limit = options.limit ?? REPUTATION_SWEEP_BATCH;
+  const now = new Date();
+
+  const [existing] = await db.select().from(syncState).where(eq(syncState.id, cursorId)).limit(1);
+  // `lastBlock` holds the last agent id for this cursor, as it does for the backfill.
+  const afterAgentId = existing?.lastBlock ?? 0;
+
+  const batch = await repository.findAgentIdsAfter(afterAgentId, limit);
+  if (batch.length === 0) {
+    /*
+     * End of the catalogue. The cursor rewinds so the next run starts over.
+     *
+     * Reputation is not write-once like an agent's identity: a client can leave feedback at
+     * any time, and a score read six months ago is not the score now. Without the rewind the
+     * sweep would complete and then report 0 for ever, freezing every figure at whenever the
+     * agent was first reached and quietly making the marketplace's central claim stale.
+     *
+     * Rewinding rather than deleting: the stored snapshots stay serving until each one is
+     * overwritten, so a pass in progress never leaves the UI with a hole in it.
+     */
+    if (afterAgentId > 0) {
+      await db
+        .update(syncState)
+        .set({ lastBlock: 0, lastRunAt: now, lastSuccessAt: now })
+        .where(eq(syncState.id, cursorId));
+      logger.info({ cursorId }, 'reputation sweep reached the end of the catalogue, rewinding');
+    }
+
+    return {
+      mode: 'reputation',
+      fromAgentId: afterAgentId,
+      toAgentId: afterAgentId,
+      swept: 0,
+      withFeedback: 0,
+      unanswered: 0,
+      remaining: 0,
+    };
+  }
+
+  const readings = await source.reputationBatch(batch.map((row) => row.agentId));
+
+  const snapshots = batch.flatMap((row) => {
+    const reading = readings.get(row.agentId);
+    return reading === undefined ? [] : [{ id: row.id, reputation: reading }];
+  });
+
+  const written = await repository.saveReputationSnapshots(snapshots);
+  const withFeedback = snapshots.filter((entry) => entry.reputation.feedbackCount > 0).length;
+
+  /*
+   * The cursor advances to the last id in the batch, not to the last id answered for.
+   *
+   * An id the registry did not answer for is a transport failure on our side, and stopping
+   * the sweep there would let one bad chunk block the remaining 300,000 agents. Sweeping
+   * is idempotent and cheap to repeat, so those ids are picked up by the next full pass
+   * rather than by blocking this one.
+   */
+  const toAgentId = batch[batch.length - 1]?.agentId ?? afterAgentId;
+
+  const cursorValues = {
+    id: cursorId,
+    lastBlock: toAgentId,
+    lastRunAt: now,
+    lastSuccessAt: now,
+    lastError: null,
+    consecutiveFailures: 0,
+  };
+  await db
+    .insert(syncState)
+    .values(cursorValues)
+    .onConflictDoUpdate({ target: syncState.id, set: cursorValues });
+
+  const remaining = (await repository.findAgentIdsAfter(toAgentId, 1)).length;
+
+  const result: ReputationSweepResult = {
+    mode: 'reputation',
+    fromAgentId: afterAgentId + 1,
+    toAgentId,
+    swept: written,
+    withFeedback,
+    unanswered: batch.length - snapshots.length,
+    remaining,
+  };
+
+  logger.info(result, 'reputation sweep pass complete');
+  return result;
+}
+
+/** Whether a looping reputation sweep has more agents to read. */
+export function reputationSweepHasMore(
+  result: Pick<ReputationSweepResult, 'remaining'>,
+): boolean {
+  return result.remaining > 0;
 }
 
 /**

@@ -6,7 +6,9 @@ import { createAgentRepository } from '../agents/agent.repository.js';
 import {
   backfillAgents,
   backfillHasMore,
+  reputationSweepHasMore,
   resolveMetadataBacklog,
+  sweepReputation,
   syncAgents,
   withIngestionLock,
 } from './sync.js';
@@ -19,6 +21,8 @@ import {
  *   pnpm sync:agents --backfill          walk agent ids (reaches the whole registry)
  *   pnpm sync:agents --backfill --limit 500
  *   pnpm sync:agents --backfill --loop   repeat until the registry is exhausted
+ *   pnpm sync:agents --metadata --loop   fetch the registration files discovery deferred
+ *   pnpm sync:agents --reputation --loop read the ReputationRegistry for every agent
  *
  * `--loop` is a long job — the full registry is ~300k ids at roughly 65 ids/sec — so it
  * reports progress with an ETA and stops cleanly on SIGINT, finishing the pass in flight
@@ -74,7 +78,7 @@ async function main(): Promise<void> {
      * stomp each other — observed, with the cursor moving backwards 160,000 ids — and the
      * everyday cause is a scheduled run starting before the previous one has finished.
      */
-    const outcome = await withIngestionLock(handle.db, logger, async () => {
+    const outcome = await withIngestionLock(handle, logger, async () => {
       /*
        * Stop at the end of the current pass rather than mid-write.
        *
@@ -176,6 +180,57 @@ async function main(): Promise<void> {
           logger.info(
             { passes, resolved, failed, remaining: result.remaining },
             'metadata progress',
+          );
+        }
+      }
+
+      /*
+       * The reputation sweep: reads the ReputationRegistry for every indexed agent.
+       *
+       * A separate mode for the same reason the metadata backlog is one. This is bound by
+       * RPC round trips and takes about half an hour for the full catalogue, so folding it
+       * into discovery would mean the catalogue only grew as fast as reputation could be
+       * read. Its own cursor means a 31-minute job survives a 15-minute CI timeout.
+       */
+      if (process.argv.includes('--reputation')) {
+        let swept = 0;
+        let withFeedback = 0;
+        let unanswered = 0;
+        let passes = 0;
+        const startedAt = Date.now();
+
+        for (;;) {
+          const result = await sweepReputation({
+            ...deps,
+            ...(limit === undefined ? {} : { limit }),
+          });
+          swept += result.swept;
+          withFeedback += result.withFeedback;
+          unanswered += result.unanswered;
+          passes += 1;
+
+          const done = !reputationSweepHasMore(result);
+          if (!loop || done || stopping) {
+            process.stdout.write(
+              `${JSON.stringify(
+                { mode: 'reputation', passes, swept, withFeedback, unanswered, done },
+                null,
+                2,
+              )}\n`,
+            );
+            return;
+          }
+
+          const elapsed = Math.max(1, (Date.now() - startedAt) / 1000);
+          logger.info(
+            {
+              passes,
+              throughAgentId: result.toAgentId,
+              swept,
+              withFeedback,
+              idsPerSecond: Math.round(swept / elapsed),
+            },
+            'reputation sweep progress',
           );
         }
       }

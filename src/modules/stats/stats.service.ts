@@ -60,6 +60,18 @@ export function createStatsService(db: Database): StatsService {
             select count(*)::int from ${agentReputation}
             where ${agentReputation.feedbackCount} > 0
           )`,
+          /**
+           * Agents whose reputation has actually been read from the registry.
+           *
+           * The denominator for every feedback figure above, and the reason it is reported.
+           * Reputation used to be read only when a visitor opened a profile, so
+           * `feedback_records` described KATTEGAT's browsing history rather than the
+           * ecosystem, and the landing page had to caveat itself as counting only what
+           * happened to have been looked at. With the sweep in place this number says how
+           * much of the catalogue the claim covers, so "no feedback" can be reported as a
+           * finding instead of an omission.
+           */
+          reputationSwept: sql<number>`(select count(*)::int from ${agentReputation})`,
           ownerCount: sql<number>`(
             select count(distinct ${agents.ownerAddress})::int from ${agents}
           )`,
@@ -78,6 +90,7 @@ export function createStatsService(db: Database): StatsService {
           classified_agents: row?.classifiedAgents ?? 0,
           feedback_records: row?.feedbackRecords ?? 0,
           rated_agents: row?.ratedAgents ?? 0,
+          reputation_swept: row?.reputationSwept ?? 0,
           owner_count: row?.ownerCount ?? 0,
           last_indexed_at: row?.lastIndexedAt ? new Date(row.lastIndexedAt).toISOString() : null,
         },

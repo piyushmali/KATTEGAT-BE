@@ -89,3 +89,29 @@ jobs:
           BSC_RPC_URL: ${{ secrets.BSC_RPC_URL }}
           IPFS_GATEWAY_URL: ${{ secrets.IPFS_GATEWAY_URL }}
         run: pnpm sync:agents --metadata --loop --limit 240
+
+      # Reputation for the whole catalogue, one slice per run.
+      #
+      # Reputation used to be read only when a visitor opened a profile, which left 130 of
+      # 317,476 agents scored, and meant the "highest reputation" and "most feedback" sorts
+      # ranked a set of 130 while `nulls last` parked the other 317,346 behind them.
+      #
+      # Batched over Multicall3 the full sweep measures 168 ids/sec, so about 31 minutes.
+      # That does not fit one run of this workflow, hence the cursor: one bounded pass per
+      # run, resumed from where the last one stopped. 12,000 ids takes roughly 70 seconds
+      # and on a 30-minute cadence covers the catalogue in about half a day, after which the
+      # cursor wraps and the sweep keeps the figures current.
+      #
+      # A single pass rather than `--loop`, deliberately. Looping here would run past the
+      # job timeout and be killed, which costs nothing in correctness (the cursor advances
+      # per pass) but reports a red run every time and makes a real failure invisible.
+      #
+      # Last of the three steps, because it is the least urgent: a missing score degrades a
+      # sort, where a missing agent is absent from the marketplace entirely.
+      - name: Sweep reputation
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BSC_RPC_URL: ${{ secrets.BSC_RPC_URL }}
+          BSC_RPC_URL_FALLBACK: ${{ secrets.BSC_RPC_URL_FALLBACK }}
+        run: pnpm sync:agents --reputation --limit 12000

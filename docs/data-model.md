@@ -54,6 +54,13 @@ that silently discards agents whose off-chain document is broken shows an incomp
 view of the ecosystem. The identity is on chain and verified; the profile is what is
 missing. Nullable timestamp lets the API and UI say exactly that.
 
+**Why a row exists for agents with no feedback.** The reputation sweep records every
+agent it reads, including the ones with nothing. "Swept, no feedback" is a finding;
+"no row" is an admission that nobody looked, and the UI needs to tell them apart. Before
+the sweep, reputation was only read when a visitor opened a profile, which left 130 rows
+out of 317,476 and meant the `reputation` and `feedback` sorts ranked a set of 130 while
+`nulls last` parked everything else behind them.
+
 **Why `metadata_attempts` exists.** The backlog pass selects unresolved agents and
 fetches their registration files. Ordered by ascending `agent_id`, as it originally was,
 it kept re-selecting the same head of the queue, and the low ids hold a wall of
