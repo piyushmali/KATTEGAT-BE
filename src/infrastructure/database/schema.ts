@@ -1,4 +1,5 @@
 import { relations } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 import {
   bigint,
   boolean,
@@ -79,6 +80,22 @@ export const agents = pgTable(
     source: text('source').notNull(),
     /** Null until the registration file resolves; drives the "partial data" UI. */
     metadataResolvedAt: timestamp('metadata_resolved_at', { withTimezone: true }),
+
+    /*
+     * How many times fetching this agent's registration file has failed.
+     *
+     * Exists because the backlog pass could otherwise never make progress. It used to
+     * select unresolved agents by ascending id, and the low ids hold a wall of
+     * permanently broken URIs (one serves an HTML page, another a Google Apps Script
+     * redirect), so every pass re-attempted the same dead rows: 479 of 480 fetches
+     * failed. Ordering by attempt count lets repeat failures sink to the back while
+     * genuinely pending agents get reached.
+     *
+     * Counted rather than flagged, so a transient outage is still retried later instead of
+     * being written off permanently on one bad night.
+     */
+    metadataAttempts: integer('metadata_attempts').notNull().default(0),
+    metadataAttemptedAt: timestamp('metadata_attempted_at', { withTimezone: true }),
     lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }).notNull().defaultNow(),
 
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -89,6 +106,14 @@ export const agents = pgTable(
     index('agents_owner_idx').on(table.ownerAddress),
     index('agents_protocol_idx').on(table.protocolTag),
     index('agents_registered_at_idx').on(table.registeredAt),
+    /*
+     * Serves the backlog pass's exact select order. Partial on the unresolved rows
+     * because that is the only slice it reads, which keeps it a fraction of the size of
+     * a full index and means resolving an agent removes its entry rather than updating it.
+     */
+    index('agents_metadata_backlog_idx')
+      .on(table.metadataAttempts, table.agentId.desc())
+      .where(sql`${table.metadataResolvedAt} is null`),
   ],
 );
 

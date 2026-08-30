@@ -157,7 +157,7 @@ export async function resolveMetadataBacklog(
   }
 
   const payloads: AgentWritePayload[] = [];
-  let failed = 0;
+  const failedIds: string[] = [];
 
   for (let i = 0; i < pending.length; i += METADATA_BACKLOG_CONCURRENCY) {
     const batch = pending.slice(i, i + METADATA_BACKLOG_CONCURRENCY);
@@ -181,15 +181,17 @@ export async function resolveMetadataBacklog(
       const { row } = entry;
 
       if (entry.profile === null) {
-        failed += 1;
+        failedIds.push(row.id);
         logger.debug({ agentId: row.agentId, reason: entry.reason }, 'metadata still unresolved');
         /*
-         * Deliberately not written back.
+         * The attempt is counted, but `metadataResolvedAt` stays null.
          *
          * Marking a failure as resolved would remove it from the backlog and lose the
          * retry; a transient outage would permanently strip an agent of its description.
-         * Leaving the row untouched means the next pass tries again, and the UI keeps
-         * showing it honestly as unresolved in the meantime.
+         * Counting the attempt instead pushes the row to the back of the queue, so the
+         * pass moves on to agents it has not tried yet and this one is still reachable
+         * once everything ahead of it has had a turn. The UI keeps showing it honestly as
+         * unresolved in the meantime.
          */
         continue;
       }
@@ -228,13 +230,14 @@ export async function resolveMetadataBacklog(
   }
 
   if (payloads.length > 0) await repository.upsertMany(payloads);
+  await repository.recordMetadataFailures(failedIds, now);
 
   const remaining = await repository.countPendingMetadata();
   const result: MetadataBacklogResult = {
     mode: 'metadata',
     attempted: pending.length,
     resolved: payloads.length,
-    failed,
+    failed: failedIds.length,
     remaining,
   };
 
