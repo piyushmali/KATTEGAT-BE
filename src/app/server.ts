@@ -24,6 +24,10 @@ import { agentRoutes } from '../modules/agents/agent.routes.js';
 import { createCategoryRepository } from '../modules/categories/category.repository.js';
 import { createCategoryService, type CategoryService } from '../modules/categories/category.service.js';
 import { categoryRoutes } from '../modules/categories/category.routes.js';
+import { createSessionAuthority } from '../integrations/altana/session-authority.js';
+import { createHiringRepository } from '../modules/hiring/hiring.repository.js';
+import { hiringRoutes } from '../modules/hiring/hiring.routes.js';
+import { createHiringService, type HiringService } from '../modules/hiring/hiring.service.js';
 import { createReputationRepository } from '../modules/reputation/reputation.repository.js';
 import {
   createReputationService,
@@ -44,6 +48,7 @@ const APP_VERSION = '0.1.0';
 export interface AppServices {
   agents: AgentService;
   categories: CategoryService;
+  hiring: HiringService;
   reputation: ReputationService;
   search: SearchService;
   stats: StatsService;
@@ -91,6 +96,17 @@ export async function buildServer({
       return randomUUID();
     },
     bodyLimit: 256 * 1024,
+    /*
+     * Fastify defaults this to 100 characters, which is shorter than the identifiers this API
+     * routes on. An Altana session key is an uncompressed secp256k1 public key: `0x04` plus
+     * 64 bytes hex, 130 characters. `DELETE /sessions/:public_key` answered 414 URI Too Long
+     * before this, so revoking authority failed on a string-length default rather than on
+     * anything about the request.
+     *
+     * 256 leaves room for a longer key format without inviting a URL as a payload; bodies are
+     * still capped by `bodyLimit` above.
+     */
+    maxParamLength: 256,
   }).withTypeProvider<ZodTypeProvider>();
 
   app.setValidatorCompiler(validatorCompiler);
@@ -124,6 +140,19 @@ export async function buildServer({
       logger,
     }),
     stats: createStatsService(db),
+    hiring: createHiringService({
+      repository: createHiringRepository(db),
+      /*
+       * Reads `AGENT_SESSION_PRIVATE_KEY` straight from the environment rather than through
+       * the validated `Env`. Deliberate: a private key in the config object is a private key
+       * in every log line that ever dumps config, and this one is only ever needed here.
+       */
+      authority: createSessionAuthority({
+        privateKey: process.env.AGENT_SESSION_PRIVATE_KEY,
+        logger,
+      }),
+      logger,
+    }),
   } satisfies AppServices);
 
   await app.register(helmet, {
@@ -183,6 +212,7 @@ export async function buildServer({
   // One prefix, registered once per domain module.
   await app.register(agentRoutes, { prefix: API_PREFIX });
   await app.register(categoryRoutes, { prefix: API_PREFIX });
+  await app.register(hiringRoutes, { prefix: API_PREFIX });
   await app.register(reputationRoutes, { prefix: API_PREFIX });
   await app.register(searchRoutes, { prefix: API_PREFIX });
   await app.register(statsRoutes, { prefix: API_PREFIX });

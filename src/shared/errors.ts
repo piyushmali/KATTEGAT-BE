@@ -12,6 +12,7 @@ export const ERROR_CODES = [
   'BAD_REQUEST',
   'VALIDATION_FAILED',
   'NOT_FOUND',
+  'CONFLICT',
   'RATE_LIMITED',
   'UPSTREAM_UNAVAILABLE',
   'UPSTREAM_PAYMENT_REQUIRED',
@@ -24,6 +25,7 @@ const STATUS_BY_CODE: Record<ErrorCode, number> = {
   BAD_REQUEST: 400,
   VALIDATION_FAILED: 422,
   NOT_FOUND: 404,
+  CONFLICT: 409,
   RATE_LIMITED: 429,
   UPSTREAM_UNAVAILABLE: 503,
   UPSTREAM_PAYMENT_REQUIRED: 502,
@@ -54,6 +56,16 @@ export const badRequest = (message: string, details?: unknown): AppError =>
 
 export const notFound = (message: string, details?: unknown): AppError =>
   new AppError('NOT_FOUND', message, details);
+
+/**
+ * The request was valid but the resource is already in the state it asked for.
+ *
+ * Distinct from `badRequest` because the client did nothing wrong and retrying will not help:
+ * revoking an already-revoked session is the case this exists for. Reporting success would
+ * imply the call did something, and reporting 400 would suggest a malformed request.
+ */
+export const conflict = (message: string, details?: unknown): AppError =>
+  new AppError('CONFLICT', message, details);
 
 /**
  * A third-party dependency (RPC endpoint, IPFS gateway, Explorer API) failed.

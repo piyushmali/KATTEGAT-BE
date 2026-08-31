@@ -193,6 +193,82 @@ export const syncState = pgTable('sync_state', {
   consecutiveFailures: integer('consecutive_failures').notNull().default(0),
 });
 
+/**
+ * Authority granted to an agent through an Altana session key.
+ *
+ * The record of a hire. Every row corresponds to a real on-chain grant: the limits below
+ * are enforced by the Altana account contract, not by this table, and the session key is
+ * registered in the public Keystore so anyone can verify the authority without asking us.
+ * This is the local index of that, so the marketplace can show a user what they granted and
+ * offer to take it back.
+ *
+ * Nothing here is the source of truth. If this table and the Keystore disagree, the chain is
+ * right. It exists because reading every session back from chain to render one page would be
+ * slow, not because the chain needs our help remembering.
+ */
+export const agentSessions = pgTable(
+  'agent_sessions',
+  {
+    /**
+     * The session key's public key, which is how revocation identifies it on chain.
+     *
+     * The primary key, because the chain already treats it as the identifier and inventing
+     * a second one would leave two ways to name the same authority.
+     */
+    publicKey: text('public_key').primaryKey(),
+
+    agentId: text('agent_id')
+      .notNull()
+      .references(() => agents.id, { onDelete: 'cascade' }),
+
+    /** The account the session can act on. */
+    walletAddress: text('wallet_address').notNull(),
+
+    /**
+     * Spend ceiling in wei, stored as text.
+     *
+     * Wei exceeds what a JS number holds exactly, and this value is only ever displayed or
+     * compared for equality, never summed. `numeric` would order correctly but invite the
+     * float conversion the text avoids.
+     */
+    spendLimitWei: text('spend_limit_wei').notNull(),
+    /** Rolling window the ceiling applies over: minute, hour, day, week, month, year. */
+    spendPeriod: text('spend_period').notNull(),
+
+    /**
+     * Call allowlist as granted, one row per permitted target or signature.
+     *
+     * Empty means the grant named no call restriction, which the SDK treats as "any target".
+     * Recorded as empty rather than as a wildcard string, so the UI can say plainly that no
+     * call restriction was set instead of implying one that reads as permissive.
+     */
+    allowedCalls: text('allowed_calls').array().notNull().default([]),
+
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+
+    /** The grant transaction, when the relay surfaced a receipt for it. */
+    grantedTxHash: text('granted_tx_hash'),
+    grantedAt: timestamp('granted_at', { withTimezone: true }).notNull().defaultNow(),
+
+    /** Set when the owner revoked. Null while the session is still live. */
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    revokedTxHash: text('revoked_tx_hash'),
+
+    /**
+     * Which chain, and therefore how much this means.
+     *
+     * 97 is BSC testnet, which is what the sandbox grants on. Stored so a mainnet session can
+     * never be rendered with the same weight as a testnet one by accident.
+     */
+    chainId: integer('chain_id').notNull(),
+  },
+  (table) => [
+    index('agent_sessions_agent_idx').on(table.agentId, table.grantedAt),
+    /* Serves the "what is still live" query, which is the only one the UI runs hot. */
+    index('agent_sessions_live_idx').on(table.expiresAt).where(sql`${table.revokedAt} is null`),
+  ],
+);
+
 export const agentsRelations = relations(agents, ({ many, one }) => ({
   categories: many(agentCategories),
   reputation: one(agentReputation, {
@@ -214,3 +290,5 @@ export type NewAgentRow = typeof agents.$inferInsert;
 export type AgentCategoryRow = typeof agentCategories.$inferSelect;
 export type AgentReputationRow = typeof agentReputation.$inferSelect;
 export type SyncStateRow = typeof syncState.$inferSelect;
+export type AgentSessionRow = typeof agentSessions.$inferSelect;
+export type NewAgentSessionRow = typeof agentSessions.$inferInsert;
