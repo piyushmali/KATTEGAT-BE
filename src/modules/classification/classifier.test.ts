@@ -56,12 +56,78 @@ describe('classifyAgent', () => {
     }
   });
 
-  it('treats a declared capability as stronger evidence than prose', () => {
-    const viaCapability = classifyAgent(agent('Unnamed strategy', null, ['rebalance']));
-    const viaKeyword = classifyAgent(agent('Portfolio helper', 'Adjusts allocation.'));
+  it('treats a declared capability as stronger evidence than a passing mention', () => {
+    /*
+     * Compares one signal against one signal. An earlier version of this test compared
+     * aggregate confidence between two fixtures carrying different numbers of signals,
+     * which stopped meaning anything once names began to score: "Portfolio helper" carries
+     * real evidence in its name, so the prose fixture legitimately outscored the capability
+     * one and the test failed for the right reason about the wrong thing.
+     */
+    const viaCapability = classifyAgent(agent('Helper', null, ['rebalance']));
+    const viaKeyword = classifyAgent(agent('Helper', 'Mentions drift in passing.'));
 
+    // A declared capability alone is enough to classify.
     expect(viaCapability[0]?.category).toBe('rebalancing');
-    expect(viaCapability[0]?.confidence).toBeGreaterThan(viaKeyword[0]?.confidence ?? 1);
+    // A single keyword alone is not, and says so rather than guessing.
+    expect(viaKeyword[0]?.category).toBe('uncategorized');
+    expect(viaKeyword[0]?.signals).toEqual(['weak-signal:rebalancing']);
+  });
+
+  it('reads the agent’s own name as a deliberate claim', () => {
+    /*
+     * The v4 gap. `Grid_*.agent` registrations on Termix describe nothing beyond their
+     * name, so a name-only match scoring 1 against a threshold of 2 filed all of them as
+     * uncategorized. Grid-trading held 7 agents out of a possible 140 because of it.
+     *
+     * A name is chosen, not mentioned, so it scores at phrase strength and clears the
+     * threshold on its own.
+     */
+    const [primary] = classifyAgent(agent('Grid_AlloyLambda.agent', 'on Termix Platform'));
+
+    expect(primary?.category).toBe('grid-trading');
+    expect(primary?.signals).toContain('name:grid');
+  });
+
+  it('still refuses a name that only looks like a category', () => {
+    // `dgrid` is a brand carried by 4,692 model-evaluation agents. The boundary rule holds
+    // for names exactly as it does for prose.
+    const [primary] = classifyAgent(agent('dgrid-worker', 'Scores AI model outputs.'));
+
+    expect(primary?.category).not.toBe('grid-trading');
+  });
+
+  it('recognises the BNB venues the launch categories are built on', () => {
+    /*
+     * 493 agents name PancakeSwap, Venus, Aave or Lista and matched nothing in v3, despite
+     * Altana shipping one skill per venue. All three descriptions here are real registry
+     * text, not invented.
+     */
+    const cases = [
+      {
+        expected: 'grid-trading',
+        input: agent(
+          'PCS Grid Verifier',
+          'Geometric grid trading on BNB/USDT via PancakeSwap. Sells computed grid plans and live strategy status.',
+        ),
+      },
+      {
+        expected: 'rebalancing',
+        input: agent(
+          'CL Manager',
+          'Automated management of concentrated liquidity positions, execution of DEX token swaps.',
+        ),
+      },
+      {
+        expected: 'health-factor-monitoring',
+        input: agent('Venus Watch', 'Tracks your Venus protocol lending position against its liquidation threshold.'),
+      },
+    ];
+
+    for (const { expected, input } of cases) {
+      const [primary] = classifyAgent(input);
+      expect(primary?.category, `${input.name} should be ${expected}`).toBe(expected);
+    }
   });
 
   it('falls back to uncategorized instead of guessing', () => {

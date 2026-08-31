@@ -93,9 +93,33 @@ function segmentMatchesTerm(segment: string, term: string): boolean {
   return segment.startsWith(`${term}-`) || segment.endsWith(`-${term}`) || segment.includes(`-${term}-`);
 }
 
-function scoreRule(rule: CategoryRule, text: string, capabilities: string[][]): Scored {
+function scoreRule(
+  rule: CategoryRule,
+  text: string,
+  name: string,
+  capabilities: string[][],
+): Scored {
   let score = 0;
   const signals: string[] = [];
+
+  /*
+   * The name, scored separately and at phrase strength.
+   *
+   * A name is a deliberate self-identification, so `Grid_Beam_Prime.agent` is strong
+   * evidence in a way that the same word buried in a paragraph is not. Scored on top of the
+   * keyword pass rather than instead of it, so a name match clears the threshold on its own
+   * (2) and a name plus corroborating prose clears it comfortably (3).
+   *
+   * This is what v3 was missing. Every `Grid_*.agent` on Termix scored exactly 1 against a
+   * threshold of 2 and was filed `uncategorized`, which is why grid-trading held seven
+   * agents out of a possible 140.
+   */
+  for (const keyword of rule.keywords) {
+    if (containsTerm(name, keyword)) {
+      score += SIGNAL_WEIGHTS.name;
+      signals.push(`name:${keyword}`);
+    }
+  }
 
   for (const term of rule.capabilityTerms) {
     const normalizedTerm = normalizeCapability(term);
@@ -155,7 +179,9 @@ export function classifyAgent(input: ClassificationInput): AgentCategoryAssignme
     .map(capabilitySegments)
     .filter((segments) => segments.length > 0);
 
-  const scored = CATEGORY_RULES.map((rule) => scoreRule(rule, text, capabilities))
+  const name = input.name.toLowerCase().replace(/\s+/g, ' ');
+
+  const scored = CATEGORY_RULES.map((rule) => scoreRule(rule, text, name, capabilities))
     .filter((entry) => entry.score > 0)
     // Ties broken by the taxonomy's declaration order so output is stable.
     .sort((a, b) => b.score - a.score);
