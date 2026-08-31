@@ -22,6 +22,7 @@ const TEST_CHAIN = 31337;
 const REBALANCER = `${String(TEST_CHAIN)}:1`;
 const YIELD_AGENT = `${String(TEST_CHAIN)}:2`;
 const NEWEST = `${String(TEST_CHAIN)}:3`;
+const OUT_OF_RANGE = `${String(TEST_CHAIN)}:4`;
 
 /**
  * Carried by every fixture so a query can isolate them from real indexed data.
@@ -115,6 +116,23 @@ beforeAll(async () => {
       source: 'test',
       metadataResolvedAt: new Date('2026-03-01T00:00:00Z'),
     },
+    {
+      // Carries a summary that is not a score. See the reputation row below.
+      id: OUT_OF_RANGE,
+      chainId: TEST_CHAIN,
+      agentId: 4,
+      ownerAddress: '0x5555555555555555555555555555555555555555',
+      agentUri: 'ipfs://test-out-of-range',
+      name: 'Latency Reporter',
+      description: 'Clients record a response time here rather than a rating.',
+      protocolTag: 'a2a',
+      traitTags: [FIXTURE_TRAIT],
+      capabilities: [],
+      registeredAtBlock: null,
+      registeredAt: null,
+      source: 'test',
+      metadataResolvedAt: new Date('2026-03-02T00:00:00Z'),
+    },
   ]);
 
   await handle.db.insert(agentCategories).values([
@@ -138,14 +156,29 @@ beforeAll(async () => {
 
   // 425 at 2 decimals == 4.25. Chosen so a bug that ignores the decimals would
   // surface as 425 instead of quietly rounding to something plausible.
-  await handle.db.insert(agentReputation).values({
-    agentId: REBALANCER,
-    feedbackCount: 3,
-    clientCount: 2,
-    summaryValue: 425,
-    summaryDecimals: 2,
-    source: 'test',
-  });
+  await handle.db.insert(agentReputation).values([
+    {
+      agentId: REBALANCER,
+      feedbackCount: 3,
+      clientCount: 2,
+      summaryValue: 425,
+      summaryDecimals: 2,
+      source: 'test',
+    },
+    {
+      /*
+       * 14133 at 2 decimals decodes to 141.33, which is outside the 0-to-100 range ERC-8004
+       * defines for a score. Taken from a real indexed agent: exactly one of the 4,358 rows
+       * carrying a summary is out of range, and it was being served as a rating.
+       */
+      agentId: OUT_OF_RANGE,
+      feedbackCount: 3,
+      clientCount: 1,
+      summaryValue: 14_133,
+      summaryDecimals: 2,
+      source: 'test',
+    },
+  ]);
 
   app = await buildServer({ env, logger: pino({ level: 'silent' }), database: handle });
   await app.ready();
@@ -287,7 +320,33 @@ describe('GET /api/v1/agents', () => {
       .json<{ data: { identity: { id: string } }[] }>()
       .data.map((agent) => agent.identity.id);
 
-    expect(ids).toEqual([NEWEST, YIELD_AGENT, REBALANCER]);
+    expect(ids).toEqual([OUT_OF_RANGE, NEWEST, YIELD_AGENT, REBALANCER]);
+  });
+
+  it('refuses to report an out-of-range summary as a score', async () => {
+    /*
+     * A live agent came back at 141.33 on a 0-to-100 scale, because this path divided the
+     * fixed-point pair inline instead of going through `decodeScore` and so skipped the
+     * range check. It was the third place in the codebase computing a score and the only one
+     * that got it wrong.
+     *
+     * `getSummary` averages whatever clients posted and the registry does not require it to
+     * be a rating, so a value outside the range is not a low score, it is not a score.
+     * `summary_value` and `summary_decimals` still carry what was recorded.
+     */
+    guard();
+    const response = await app.inject({ method: 'GET', url: `/api/v1/agents/${OUT_OF_RANGE}` });
+
+    const { reputation } = response.json<{
+      data: {
+        reputation: { score: number | null; summary_value: number; feedback_count: number };
+      };
+    }>().data;
+
+    expect(reputation.score).toBeNull();
+    // The recorded value survives, so the UI can show it as recorded rather than as a rating.
+    expect(reputation.summary_value).toBe(14_133);
+    expect(reputation.feedback_count).toBe(3);
   });
 
   it('never serves a blank name or description', async () => {

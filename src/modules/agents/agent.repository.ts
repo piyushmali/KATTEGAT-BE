@@ -35,6 +35,7 @@ import {
   toDeclaredBoolean,
   toTrustModels,
 } from './agent.types.js';
+import { decodeScore } from '../reputation/score.js';
 
 /**
  * All SQL for the agents domain lives here.
@@ -218,10 +219,20 @@ function toSummary(
           clientCount: reputationRow.clientCount,
           summaryValue,
           summaryDecimals,
-          score:
-            summaryValue !== null && summaryDecimals !== null
-              ? summaryValue / 10 ** summaryDecimals
-              : null,
+          /*
+           * Through `decodeScore`, not divided inline.
+           *
+           * This was the third path computing a score and the only one that skipped the
+           * range check, so the list and search endpoints served values ERC-8004 does not
+           * define as scores. A live agent came back at 141.33 on a 0-to-100 scale.
+           *
+           * `getSummary` averages whatever clients posted and the registry does not require
+           * it to be a rating: a client may record a latency or a cost in the same field. A
+           * value outside the range is therefore not a score at all, and `decodeScore`
+           * returns null while `summaryValue` and `summaryDecimals` still carry what was
+           * actually recorded.
+           */
+          score: decodeScore(summaryValue, summaryDecimals),
           source: reputationRow.source,
           computedAt: reputationRow.computedAt,
         }
