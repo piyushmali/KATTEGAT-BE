@@ -92,19 +92,55 @@ export function createSearchService({ repository, ai, logger }: SearchServiceDep
         }
       }
 
-      const result = await repository.list({
-        filters: {
-          ...(intent.text ? { query: intent.text } : {}),
-          ...(intent.category ? { category: intent.category } : {}),
-          ...(intent.protocol ? { protocolTag: intent.protocol as never } : {}),
-          ...(intent.traits.length > 0 ? { traits: intent.traits } : {}),
-          ...(intent.resolvedOnly ? { resolvedOnly: true } : {}),
-        },
-        sort: intent.sort,
-        direction: intent.direction,
-        page: query.page,
-        perPage: query.per_page,
-      });
+      const structured =
+        intent.category !== null || intent.protocol !== null || intent.traits.length > 0;
+
+      const runList = (withText: boolean) =>
+        repository.list({
+          filters: {
+            ...(withText && intent.text ? { query: intent.text } : {}),
+            ...(intent.category ? { category: intent.category } : {}),
+            ...(intent.protocol ? { protocolTag: intent.protocol as never } : {}),
+            ...(intent.traits.length > 0 ? { traits: intent.traits } : {}),
+            ...(intent.resolvedOnly ? { resolvedOnly: true } : {}),
+          },
+          sort: intent.sort,
+          direction: intent.direction,
+          page: query.page,
+          perPage: query.per_page,
+        });
+
+      let result = await runList(true);
+      let widened = false;
+
+      /*
+       * The residual text is a refinement, not a requirement.
+       *
+       * After the parser lifts a category out of a sentence, what remains is usually
+       * grammar rather than a term anyone chose. "I need an agent to protect my loan from
+       * liquidation" resolves to health-factor-monitoring, correctly, and leaves the text
+       * "protect loan from" behind. ANDing that against the description matched nothing, so
+       * the query that the search box explicitly invites returned an empty grid while 44
+       * matching agents sat in the category it had just identified.
+       *
+       * Sometimes the residue is real: "grid trading on pancakeswap" leaves "pancakeswap",
+       * which is a term agents genuinely use. So the text is tried first and dropped only
+       * when keeping it would mean showing nothing, and the interpretation says so rather
+       * than quietly returning different results than it claims.
+       *
+       * Only when a structured filter survives. Dropping the text from a query that resolved
+       * to nothing else would turn a failed search into the entire catalogue.
+       */
+      if (result.total === 0 && structured && intent.text !== null) {
+        const widerResult = await runList(false);
+        if (widerResult.total > 0) {
+          result = widerResult;
+          widened = true;
+          intent.explanation.push(
+            `No agent matched "${intent.text}" as text, so that part was dropped and the category kept.`,
+          );
+        }
+      }
 
       return {
         data: result.agents.map(toWireAgent),
@@ -113,8 +149,10 @@ export function createSearchService({ repository, ai, logger }: SearchServiceDep
           interpretation: {
             query: query.q,
             resolved_by: resolvedBy,
+            widened,
             filters: {
-              text: intent.text,
+              // Null when the text was dropped, so the reported filters are the ones used.
+              text: widened ? null : intent.text,
               category: intent.category,
               protocol: intent.protocol,
               traits: intent.traits,

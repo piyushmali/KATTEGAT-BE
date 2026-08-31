@@ -23,6 +23,15 @@ export const searchInterpretationSchema = z.object({
   query: z.string(),
   /** `rules` or `ai-assisted`; see modules/search/search.service.ts. */
   resolved_by: z.enum(['rules', 'ai-assisted']),
+  /**
+   * True when the residual free text was dropped to avoid returning nothing.
+   *
+   * After a category is lifted out of a sentence, what remains is often grammar rather than
+   * a term anyone chose, and ANDing it against descriptions can zero out a good category
+   * match. Reported so the UI can say the query was widened instead of showing results that
+   * do not match the filters it claims.
+   */
+  widened: z.boolean(),
   filters: z.object({
     text: z.string().nullable(),
     category: agentCategoryEnum.nullable(),
