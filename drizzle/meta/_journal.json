@@ -15,6 +15,13 @@
       "when": 1788087282771,
       "tag": "0001_slimy_jane_foster",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788181554321,
+      "tag": "0002_lazy_bloodscream",
+      "breakpoints": true
     }
   ]
 }
