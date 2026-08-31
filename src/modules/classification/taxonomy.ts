@@ -113,6 +113,19 @@ export const CATEGORY_RULES: readonly CategoryRule[] = [
       'allocation drift',
       'target weight',
       'threshold band',
+      /*
+       * BNB-native LP management. This is the category as Agent Studio and Altana define
+       * it ("manages LP ranges, resets positions automatically"), and the vocabulary the
+       * reference agents actually use, none of which v3 knew: 493 agents name a BNB
+       * protocol and scored nothing from it.
+       */
+      'concentrated liquidity',
+      'liquidity position',
+      'lp range',
+      'lp position',
+      'reset position',
+      'position management',
+      'pancakeswap liquidity',
     ],
     keywords: ['rebalance', 'reallocate', 'allocation', 'portfolio', 'drift', 'weighting'],
     counterKeywords: [],
@@ -137,6 +150,7 @@ export const CATEGORY_RULES: readonly CategoryRule[] = [
     ],
     phrases: [
       'grid trading',
+      'grid-trading',
       'grid bot',
       'grid strategy',
       'grid level',
@@ -146,6 +160,21 @@ export const CATEGORY_RULES: readonly CategoryRule[] = [
       'range-bound',
       'order ladder',
       'ladder of orders',
+      /*
+       * The shapes the real BNB grid agents use, read out of the registry rather than
+       * guessed. Every one of these is a live description: "Geometric grid trading on
+       * BNB/USDT via PancakeSwap", "verifies a PancakeSwap v3 grid configuration",
+       * "Deterministic grid planning: symmetric buy and sell ladders".
+       */
+      'grid plan',
+      'grid config',
+      'grid strateg',
+      'geometric grid',
+      'symmetric buy and sell',
+      'buy and sell ladder',
+      'pancakeswap v3 grid',
+      'pancakeswap v2 grid',
+      'pancakeswap grid',
     ],
     keywords: ['grid', 'ladder', 'spread', 'market-making', 'oscillat'],
     counterKeywords: ['power grid', 'energy grid', 'grid computing'],
@@ -179,6 +208,20 @@ export const CATEGORY_RULES: readonly CategoryRule[] = [
       'vault strateg',
       'liquidity mining',
       'risk-adjusted yield',
+      /*
+       * The BNB yield venues by name. Altana ships skills for exactly these (Lista Liquid
+       * Staking, Venus Lending, PancakeSwap Liquidity, Aave V3 Lending), so an agent naming
+       * one is describing where it puts capital, not making conversation.
+       */
+      'liquid staking',
+      'lista liquid staking',
+      'lista dao',
+      'venus lending',
+      'aave v3',
+      'supply apy',
+      'lending apy',
+      'staking reward',
+      'restak',
     ],
     keywords: ['yield', 'apy', 'apr', 'farming', 'compounding', 'staking', 'vault', 'lp'],
     // A dashboard that merely surfaces APYs is discovery, not optimisation.
@@ -214,6 +257,20 @@ export const CATEGORY_RULES: readonly CategoryRule[] = [
       'top up collateral',
       'repay debt',
       'deleverag',
+      /*
+       * The lending markets on BNB Chain that have a health factor to monitor. Venus and
+       * Aave both expose one literally, and Altana ships a skill per venue, so naming the
+       * venue alongside a position is what this category looks like in practice.
+       */
+      'venus protocol',
+      'venus position',
+      'aave position',
+      'lending position',
+      'borrow position',
+      'debt position',
+      'liquidation threshold',
+      'liquidation price',
+      'position health',
     ],
     keywords: ['liquidation', 'collateral', 'borrow', 'lending', 'ltv', 'debt', 'leverage'],
     counterKeywords: [],
@@ -474,6 +531,20 @@ export const CATEGORY_RULES: readonly CategoryRule[] = [
 /** Weight per evidence class. Capability claims outrank prose. */
 export const SIGNAL_WEIGHTS = {
   capability: 3,
+  /**
+   * A term in the agent's own name.
+   *
+   * Phrase-strength, and for the same reason a declared capability outranks prose: a name
+   * is a deliberate self-identification, not something mentioned in passing. `Grid_Beam_Prime`
+   * is telling you what it is.
+   *
+   * This was the single biggest gap in v3. A name-only match scored 1 against a threshold of
+   * 2, so `Grid_AlloyLambda.agent on Termix Platform` and the whole family of
+   * `Grid_*.agent` registrations fell through to `uncategorized` while grid-trading held
+   * seven agents. Names are short and chosen, so the false-positive risk is far lower than
+   * for description prose.
+   */
+  name: 2,
   phrase: 2,
   keyword: 1,
   counter: -3,
@@ -513,5 +584,21 @@ export const SECONDARY_THRESHOLD = 2;
  * string "dgrid", and a careless `grid` term would have filed 4,692 model-evaluation
  * agents under Grid Trading. The word-boundary rule in the classifier is what stopped
  * that, and it is why terms are matched on boundaries rather than by substring.
+ *
+ * v4 went after the four launch categories specifically, because they held 186 agents
+ * between them while `trading-execution` held 129,184. Measuring the gap rather than
+ * assuming it found two causes, both ours rather than the registry's:
+ *
+ *   - A name-only match scored 1 against a threshold of 2, so every `Grid_*.agent` on
+ *     Termix was filed `uncategorized`. A name is a deliberate self-identification and now
+ *     scores at phrase strength. Grid-trading held 7 of a possible 140.
+ *   - The vocabulary had no BNB-native protocol terms at all. PancakeSwap, Venus, Aave and
+ *     Lista appear in 493 agents and matched nothing, despite Altana shipping a skill per
+ *     venue and the reference agents describing themselves as "Geometric grid trading on
+ *     BNB/USDT via PancakeSwap".
+ *
+ * Every added phrase was read out of a live description rather than invented, which is the
+ * same discipline as v3's `score/vote`: matched because the corpus contains it, not because
+ * it sounds like what a category should say.
  */
-export const CLASSIFIER_VERSION = 'rules-v3';
+export const CLASSIFIER_VERSION = 'rules-v4';

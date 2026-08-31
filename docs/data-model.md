@@ -54,6 +54,14 @@ that silently discards agents whose off-chain document is broken shows an incomp
 view of the ecosystem. The identity is on chain and verified; the profile is what is
 missing. Nullable timestamp lets the API and UI say exactly that.
 
+**Why the launch four are small, and why that is the honest number.** After `rules-v4`
+the four BNB Agent Studio categories hold 500 agents: grid-trading 120, yield 239,
+rebalancing 97, health-factor 44. A further 250 sit in `uncategorized` carrying a single
+keyword each, recorded as `weak-signal:<category>`. Clearing them would mean dropping
+`PRIMARY_THRESHOLD` to 1, which turns one passing mention of "portfolio" or "yield" into a
+category assignment. A wrong category is worse than none, because a visitor cannot tell it
+is wrong, so the threshold stays and the weak signals stay visible.
+
 **Why a row exists for agents with no feedback.** The reputation sweep records every
 agent it reads, including the ones with nothing. "Swept, no feedback" is a finding;
 "no row" is an admission that nobody looked, and the UI needs to tell them apart. Before
