@@ -23,12 +23,16 @@
     "db:studio": "drizzle-kit studio",
     "sync:agents": "tsx --env-file-if-exists=.env src/modules/ingestion/sync.cli.ts",
     "reclassify": "tsx --env-file-if-exists=.env src/modules/classification/reclassify.cli.ts",
-    "verify:chain": "tsx --env-file-if-exists=.env scripts/verify-chain.ts"
+    "verify:chain": "tsx --env-file-if-exists=.env scripts/verify-chain.ts",
+    "altana:smoke": "tsx --env-file-if-exists=.env scripts/altana-smoke.ts"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   },
   "dependencies": {
+    "@altananetwork/sdk": "^0.8.0",
     "@fastify/cors": "11.3.0",
     "@fastify/helmet": "13.1.1",
     "@fastify/rate-limit": "11.2.0",
