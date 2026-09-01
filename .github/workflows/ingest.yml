@@ -20,23 +20,32 @@ name: Ingest agents
 #
 # Measured: 412 new agents caught up in 5 seconds, one pass.
 #
-# COST
+# WHY THIS IS NO LONGER SCHEDULED
 #
-# Private repositories get 2,000 free Actions minutes a month, and GitHub bills whole
-# minutes per job. At roughly one minute a run that allows a 30-minute cadence with room
-# to spare. Public repositories get unlimited minutes, so making these public — which a
-# hackathon submission usually wants anyway — permits every 5 minutes at no cost.
+# It was, every 30 minutes, and it failed every single time: there is no DATABASE_URL
+# secret, because the deployment does not want one. The deployed catalogue is a snapshot
+# and ingestion runs against the full local database, which is a deliberate decision with
+# its reasons in docs/deployment.md. So the schedule was writing nowhere, and a workflow
+# that fails on a timer is worse than no workflow: it burns the Actions allowance and
+# trains everyone to ignore a red mark that will one day mean something.
+#
+# Dispatch-only keeps the capability without the noise. Set DATABASE_URL as a secret and
+# run it by hand to bring a live database current, or re-add a schedule at the point that
+# database is meant to be continuously indexed rather than snapshotted.
+#
+# COST, if a schedule is ever restored
+#
+# Private repositories get 2,000 free Actions minutes a month and GitHub bills whole
+# minutes per job, so a 30-minute cadence is ~1,440 minutes before anything else runs, and
+# the keepalive alone needs ~4,320. Between them they do not fit. Public repositories get
+# unlimited minutes, which a hackathon submission usually wants anyway, and is the cheapest
+# way out of that arithmetic.
 #
 # The registry currently grows at roughly 150-275 agents an hour, so a 30-minute cadence
-# leaves the index at most ~140 agents behind out of 317,000: under 0.05%.
+# would leave the index at most ~140 agents behind out of 325,000: under 0.05%.
 
 on:
-  schedule:
-    # Every 30 minutes. GitHub does not guarantee punctuality for scheduled runs and may
-    # delay them under load, which is fine — the cursor makes every run resumable, so a
-    # late run simply covers a wider id range.
-    - cron: '*/30 * * * *'
-  # So a demo can be brought current on demand without waiting for the schedule.
+  # Deliberately no `schedule`. See above.
   workflow_dispatch:
 
 # A run that overlaps its predecessor would be refused by the database advisory lock
