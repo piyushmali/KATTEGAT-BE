@@ -137,6 +137,29 @@ in step 1; change both together or neither.
 working while every browser request is blocked, so the API looks healthy and the
 site looks broken.
 
+#### If you configure the service by hand instead
+
+The Blueprint flow reads `render.yaml`; the "New Web Service" flow does not, so
+everything in it has to be typed. Build command:
+
+```
+corepack enable && pnpm install --frozen-lockfile && pnpm build
+```
+
+`corepack enable` so the pinned `packageManager` is honoured and
+`--frozen-lockfile` is not comparing against a different pnpm's lockfile format,
+and `&&` rather than `;` so a failed install does not go on to report a
+misleading TypeScript error.
+
+Start command is `pnpm start`, health check path `/health`, and the variables are
+those in `render.yaml` plus `NODE_ENV`, `LOG_LEVEL` and `NODE_VERSION`.
+
+Two things not to do. Do not set `PORT`: the platform injects it and the app reads
+it, so overriding it breaks routing. And do not use "Add from .env", which will
+inject `NODE_ENV=development` and a `DATABASE_URL` pointing at `127.0.0.1` — the
+container then tries to reach a Postgres inside itself and fails in a way that
+reads as a Neon problem.
+
 ### 3. Vercel
 
 Import `KATTEGAT-FE`. One variable:

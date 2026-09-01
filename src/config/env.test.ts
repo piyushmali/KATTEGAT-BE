@@ -92,3 +92,45 @@ describe('parseEnv', () => {
     }
   });
 });
+
+/**
+ * The bind address, which has no single correct default.
+ *
+ * This is here because getting it wrong cost a deployment and the symptom pointed nowhere near
+ * the cause: the service built, validated its environment, reached Postgres, logged "Server
+ * listening at http://127.0.0.1:10000", and the platform then reported "No open ports detected on
+ * 0.0.0.0" for five minutes. A process that is plainly running, and a message naming neither the
+ * variable nor the process.
+ */
+describe('HOST', () => {
+  const base = { DATABASE_URL: 'postgres://user:pass@host:5432/db' };
+
+  it('binds loopback in development, so a dev server is not exposed to the network', () => {
+    expect(parseEnv({ ...base }).HOST).toBe('127.0.0.1');
+  });
+
+  it('binds every interface in production, because a container is reached from outside', () => {
+    /*
+     * The regression this exists for. On loopback the platform's health check cannot reach the
+     * process however healthy it is, and nothing in the logs says so.
+     */
+    const env = parseEnv({
+      ...base,
+      NODE_ENV: 'production',
+      CORS_ORIGINS: 'https://kattegat.vercel.app',
+    });
+
+    expect(env.HOST).toBe('0.0.0.0');
+  });
+
+  it('still lets a deployment name its own interface', () => {
+    const env = parseEnv({
+      ...base,
+      NODE_ENV: 'production',
+      HOST: '10.0.0.5',
+      CORS_ORIGINS: 'https://kattegat.vercel.app',
+    });
+
+    expect(env.HOST).toBe('10.0.0.5');
+  });
+});

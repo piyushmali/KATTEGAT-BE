@@ -31,7 +31,11 @@ const booleanish = z
 const envSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-    HOST: z.string().min(1).default('127.0.0.1'),
+    /**
+     * Interface to bind. Left without a default here because the right one depends on
+     * NODE_ENV, which is resolved in the transform below.
+     */
+    HOST: z.string().min(1).optional(),
     PORT: z.coerce.number().int().min(1).max(65_535).default(4000),
     LOG_LEVEL: z
       .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
@@ -167,7 +171,28 @@ const envSchema = z
         message: 'wildcard origin is not allowed in production',
       });
     }
-  });
+  })
+  .transform((env) => ({
+    ...env,
+    /**
+     * Loopback locally, every interface in production.
+     *
+     * A single default cannot be right for both. `127.0.0.1` is correct on a laptop, where
+     * binding every interface would expose a dev server to the network. It is always wrong in a
+     * container: the platform reaches the process from outside, so a service on loopback is
+     * unreachable no matter how healthy it is.
+     *
+     * This exists because the wrong half of that cost a deployment. The service built, validated
+     * its environment, connected to Postgres and logged "Server listening at
+     * http://127.0.0.1:10000", and the platform then spent five minutes reporting "No open ports
+     * detected on 0.0.0.0" — a message that names neither the variable nor the process that is
+     * plainly running. Nothing was broken except one default that had no business being the same
+     * in both places.
+     *
+     * Still overridable, because a deployment that needs a specific interface should say so.
+     */
+    HOST: env.HOST ?? (env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1'),
+  }));
 
 export type Env = z.infer<typeof envSchema>;
 

@@ -34,9 +34,11 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      # Render routes to the container's published port, so binding to loopback would make the
-      # service unreachable and the health check would fail with no obvious cause. The default in
-      # config/env.ts is 127.0.0.1, which is right for local and wrong here.
+      # Redundant since config/env.ts defaults HOST to 0.0.0.0 whenever NODE_ENV is production,
+      # and kept anyway because this file is also documentation. Binding loopback in a container
+      # makes the service unreachable while every log line looks healthy, and Render reports it as
+      # "No open ports detected on 0.0.0.0" — a message naming neither the variable nor the
+      # process. Worth being explicit about the thing that failure taught us.
       - key: HOST
         value: 0.0.0.0
       - key: NODE_VERSION
