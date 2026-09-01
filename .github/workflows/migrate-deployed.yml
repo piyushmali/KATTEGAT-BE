@@ -57,13 +57,22 @@ jobs:
           DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
         run: pnpm db:migrate
 
-      # A new index has no statistics until this runs, and the planner will ignore it in favour
-      # of the sequential scan the index was added to avoid.
-      - name: Analyze
+      # A new index has no statistics until ANALYZE runs, and the planner will ignore it in
+      # favour of the sequential scan the index was added to avoid.
+      #
+      # VACUUM as well, because statistics are only half of it. An index-only scan needs the
+      # visibility map, which only VACUUM builds, and on this schema that is the difference
+      # between answering a count from a 2 MB index and reading a 290 MB heap.
+      - name: Vacuum and analyze
         if: ${{ inputs.analyze }}
         env:
           DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
-        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "ANALYZE;"
+        run: |
+          set -euo pipefail
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "VACUUM ANALYZE;"
+          psql "$DATABASE_URL" -tAc \
+            "select 'visibility map: ' || relallvisible || ' of ' || relpages || ' pages'
+             from pg_class where relname = 'agents'"
 
       - name: Verify
         env:

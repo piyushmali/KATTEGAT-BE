@@ -132,15 +132,30 @@ jobs:
             -d "$DATABASE_URL" \
             "$DUMP"
 
-      # pg_restore does not do this, and without it the planner has no statistics and
-      # sequential-scans tables that have perfectly good indexes.
-      - name: Analyze
+      # VACUUM ANALYZE, not ANALYZE. pg_restore leaves neither statistics nor a visibility map,
+      # and they fix different things.
+      #
+      # ANALYZE alone gives the planner statistics, without which it sequential-scans tables that
+      # have perfectly good indexes. That part was already understood.
+      #
+      # VACUUM builds the visibility map, and without it an index-only scan is impossible: the
+      # executor cannot know a heap page is all-visible, so it visits the heap for every index
+      # tuple and the index stops being a shortcut. It costs more than it sounds like on this
+      # schema, because the agents heap is 290 MB while the indexes that can answer these counts
+      # are 2 to 18 MB.
+      #
+      # Measured on the landing page's stats aggregate: 10.2s with statistics but no visibility
+      # map, against 24ms for count(*) once index-only scans are available.
+      - name: Vacuum and analyze
         env:
           DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
         run: |
           set -euo pipefail
           export PATH="/usr/lib/postgresql/18/bin:$PATH"
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "ANALYZE;"
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "VACUUM ANALYZE;"
+          psql "$DATABASE_URL" -tAc \
+            "select 'visibility map: ' || relallvisible || ' of ' || relpages || ' pages'
+             from pg_class where relname = 'agents'"
 
       - name: Verify
         env:
