@@ -23,15 +23,16 @@ export interface StatsService {
 }
 
 /**
- * How long a reading is reused.
+ * How long a reading is reused before a refresh is started.
  *
- * These are nine aggregates over 317,476 rows, including two `count(distinct …)`, and they
- * measured 586ms against the deployed database. That is paid above the fold on every visit to
- * the landing page, and no index removes it: counting distinct owners means visiting every row.
+ * These are nine aggregates over 325,546 rows. Eight of them are index-only scans and cost
+ * almost nothing. The ninth counts agents carrying the `declared-active` trait, which 238,206
+ * rows do, and at 73% selectivity the planner correctly sequential-scans rather than using the
+ * GIN index on `trait_tags`. That scan reads the 290 MB agents heap on an instance with 256 MB
+ * of RAM, so the whole aggregate measures 9.4s against the deployed database.
  *
  * A minute, because the only thing that changes these numbers is an ingestion pass, and the
- * fastest of those runs every thirty. Short enough that nobody sees a figure they would call
- * wrong, long enough that a burst of visitors costs one query rather than one each.
+ * fastest of those runs every thirty.
  *
  * The reading stays honest while cached: `last_indexed_at` travels with it, so the payload says
  * how current the underlying index is regardless of when these counts were taken.
@@ -44,7 +45,16 @@ export function createStatsService(db: Database): StatsService {
    * query instead of each starting its own. Cleared on failure below, so an error is retried
    * rather than cached for a minute.
    */
-  let cached: { value: Promise<EcosystemStatsResponse>; at: number } | null = null;
+  /**
+   * The last reading that succeeded, kept separately from any refresh in flight.
+   *
+   * Two fields rather than one cached promise, because a single slot cannot do
+   * stale-while-revalidate: as soon as the refresh is stored, later callers await the pending
+   * query instead of being handed the previous answer, which is the wait this is meant to avoid.
+   */
+  let lastGood: { value: EcosystemStatsResponse; at: number } | null = null;
+  /** Deduplicates concurrent refreshes; null when none is running. */
+  let inFlight: Promise<EcosystemStatsResponse> | null = null;
 
   async function read(): Promise<EcosystemStatsResponse> {
     const [row] = await db
@@ -124,19 +134,48 @@ export function createStatsService(db: Database): StatsService {
     };
   }
 
+  function refresh(): Promise<EcosystemStatsResponse> {
+    /*
+     * `lastGood` is only advanced on success, so a failed refresh leaves the previous reading in
+     * place instead of blanking the stat cards. `inFlight` is cleared either way, so the next
+     * caller retries rather than inheriting a rejected promise.
+     */
+    inFlight ??= read()
+      .then((value) => {
+        lastGood = { value, at: Date.now() };
+        return value;
+      })
+      .finally(() => {
+        inFlight = null;
+      });
+
+    return inFlight;
+  }
+
   return {
+    /**
+     * Stale-while-revalidate. Expiry is the expensive moment, and it should not land on a
+     * visitor.
+     *
+     * Plain expiry means whoever arrives first after the TTL waits the full 9.4s, so on a busy
+     * site that is one unlucky request per minute, forever, for figures that did not move: the
+     * deployed catalogue is a snapshot and ingestion runs elsewhere, so nothing changes these
+     * counts until the next restore.
+     *
+     * Handing back the previous reading and refreshing behind it costs at most one extra TTL of
+     * staleness, which `last_indexed_at` already reports honestly, and takes the scan off the
+     * request path completely. Only the very first call, before anything has been read, waits.
+     */
     ecosystem(): Promise<EcosystemStatsResponse> {
-      if (cached === null || Date.now() - cached.at > STATS_TTL_MS) {
-        cached = {
-          at: Date.now(),
-          value: read().catch((error: unknown) => {
-            cached = null;
-            throw error;
-          }),
-        };
+      if (lastGood === null) return refresh();
+
+      if (Date.now() - lastGood.at > STATS_TTL_MS) {
+        // Deliberately not awaited. Errors are swallowed here because the caller is already
+        // being served a good answer; `refresh` has kept `lastGood` intact.
+        void refresh().catch(() => undefined);
       }
 
-      return cached.value;
+      return Promise.resolve(lastGood.value);
     },
   };
 }

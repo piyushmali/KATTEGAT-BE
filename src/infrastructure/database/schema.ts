@@ -159,6 +159,16 @@ export const agents = pgTable(
      */
     index('agents_name_trgm_idx').using('gin', sql`${table.name} gin_trgm_ops`),
     index('agents_description_trgm_idx').using('gin', sql`${table.description} gin_trgm_ops`),
+    /*
+     * Trait filtering. `arrayContains` compiles to `trait_tags @> array[...]`, which GIN serves
+     * directly, and 664 kB buys the difference between a 290 MB sequential scan and a 0.024ms
+     * bitmap lookup for a selective trait. The discover page filters on these.
+     *
+     * It will not help every trait, and that is fine. `declared-active` is carried by 238,206
+     * of 325,546 rows, so the planner sequential-scans it and is right to: at 73% selectivity
+     * an index costs more than it saves. Selective traits are what this is for.
+     */
+    index('agents_trait_tags_idx').using('gin', table.traitTags),
   ],
 );
 

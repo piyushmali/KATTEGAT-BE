@@ -1,0 +1,1 @@
+CREATE INDEX "agents_trait_tags_idx" ON "agents" USING gin ("trait_tags");
