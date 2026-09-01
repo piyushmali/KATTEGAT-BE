@@ -26,7 +26,7 @@ import { createCategoryService, type CategoryService } from '../modules/categori
 import { categoryRoutes } from '../modules/categories/category.routes.js';
 import { createGasSponsor } from '../integrations/altana/gas-sponsor.js';
 import { createKeystoreReader } from '../integrations/altana/keystore.js';
-import { resolveNetwork } from '../integrations/altana/network.js';
+import { createNetworkReader, resolveNetwork } from '../integrations/altana/network.js';
 import { createHiringRepository } from '../modules/hiring/hiring.repository.js';
 import { hiringRoutes } from '../modules/hiring/hiring.routes.js';
 import { createHiringService, type HiringService } from '../modules/hiring/hiring.service.js';
@@ -141,6 +141,26 @@ export async function buildServer({
   const altanaKeystore = createKeystoreReader(altanaNetwork, logger);
 
   /*
+   * ERC-8183 on the session's chain, for hiring.
+   *
+   * A second reader rather than reusing the indexing one, because a hire lands on whatever chain
+   * the user's session lives on and verification has to read that kernel. Sharing the indexer's
+   * reader would verify jobs against the wrong chain whenever `ALTANA_NETWORK` is not the
+   * registry's, which is exactly the case on testnet.
+   *
+   * Takes a client getter, not a client: the Altana network picks its RPC endpoint by probing, and
+   * doing that at construction would put a round trip in the startup path.
+   */
+  const altanaReader = createNetworkReader(altanaNetwork, logger);
+  const hiringEscrow = createErc8183JobReader({
+    env,
+    logger,
+    client: () => altanaReader.client(),
+    chainId: altanaNetwork.config.chainId,
+    explorerUrl: altanaNetwork.config.explorer,
+  });
+
+  /*
    * ERC-8183 escrow, read from the same chain as the registry rather than from `ALTANA_NETWORK`.
    *
    * Deliberately not the session network. Jobs are linked to agents by provider address, and an
@@ -183,6 +203,8 @@ export async function buildServer({
         logger,
       }),
       network: altanaNetwork,
+      escrow: hiringEscrow,
+      jobs: jobRepository,
       logger,
     }),
   } satisfies AppServices);

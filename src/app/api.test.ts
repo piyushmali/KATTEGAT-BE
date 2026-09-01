@@ -9,6 +9,7 @@ import {
   agentReputation,
   agents,
 } from '../infrastructure/database/schema.js';
+import { REGISTRY_CHAIN } from '../integrations/bsc-client.js';
 import { buildServer } from './server.js';
 import type { AppInstance } from './app-instance.js';
 
@@ -42,6 +43,13 @@ const OUT_OF_RANGE = `${String(TEST_CHAIN)}:4`;
  * the front of every list. Fixing that ordering is what exposed the coupling.
  */
 const FIXTURE_TRAIT = 'test-fixture-only';
+/**
+ * Job ids for fixtures, far above the live counter (56,680 at the time of writing).
+ *
+ * Escrow evidence is scoped to the real chain, so these rows cannot use the fictional 31337 the
+ * agents use. This keeps them from colliding with anything the indexer writes.
+ */
+const JOB_ID_BASE = 9_000_000;
 
 const databaseUrl = process.env.DATABASE_URL;
 
@@ -193,12 +201,20 @@ beforeAll(async () => {
    * 6 rather than something plausible. That distinction is the whole point: `createJob` and
    * `setBudget` cost nothing, and only `fund` moves tokens, so an OPEN budget is a figure
    * someone typed rather than money at stake.
+   *
+   * Unlike the agents above, these carry the real chain id rather than 31337. They have to:
+   * an agent's escrow record counts only the chain the catalogue was indexed from, so jobs on a
+   * fictional chain would be filtered out and every assertion below would pass against zero.
+   *
+   * Collision with real data is avoided by job id instead. `JOB_ID_BASE` sits far above the live
+   * counter, and these rows are removed by agent rather than by chain so the cleanup cannot
+   * reach anything the indexer wrote.
    */
   await handle.db.insert(agentJobs).values([
     {
-      id: `${String(TEST_CHAIN)}:901`,
-      chainId: TEST_CHAIN,
-      jobId: 901,
+      id: `${String(REGISTRY_CHAIN.id)}:${String(JOB_ID_BASE + 901)}`,
+      chainId: REGISTRY_CHAIN.id,
+      jobId: JOB_ID_BASE + 901,
       clientAddress: '0x6666666666666666666666666666666666666666',
       providerAddress: '0x2222222222222222222222222222222222222222',
       evaluatorAddress: '0x7777777777777777777777777777777777777777',
@@ -209,9 +225,9 @@ beforeAll(async () => {
       agentId: REBALANCER,
     },
     {
-      id: `${String(TEST_CHAIN)}:902`,
-      chainId: TEST_CHAIN,
-      jobId: 902,
+      id: `${String(REGISTRY_CHAIN.id)}:${String(JOB_ID_BASE + 902)}`,
+      chainId: REGISTRY_CHAIN.id,
+      jobId: JOB_ID_BASE + 902,
       clientAddress: '0x6666666666666666666666666666666666666666',
       providerAddress: '0x2222222222222222222222222222222222222222',
       evaluatorAddress: '0x7777777777777777777777777777777777777777',
@@ -222,9 +238,9 @@ beforeAll(async () => {
       agentId: REBALANCER,
     },
     {
-      id: `${String(TEST_CHAIN)}:903`,
-      chainId: TEST_CHAIN,
-      jobId: 903,
+      id: `${String(REGISTRY_CHAIN.id)}:${String(JOB_ID_BASE + 903)}`,
+      chainId: REGISTRY_CHAIN.id,
+      jobId: JOB_ID_BASE + 903,
       clientAddress: '0x6666666666666666666666666666666666666666',
       providerAddress: '0x2222222222222222222222222222222222222222',
       evaluatorAddress: '0x7777777777777777777777777777777777777777',
@@ -237,9 +253,9 @@ beforeAll(async () => {
       agentId: REBALANCER,
     },
     {
-      id: `${String(TEST_CHAIN)}:904`,
-      chainId: TEST_CHAIN,
-      jobId: 904,
+      id: `${String(REGISTRY_CHAIN.id)}:${String(JOB_ID_BASE + 904)}`,
+      chainId: REGISTRY_CHAIN.id,
+      jobId: JOB_ID_BASE + 904,
       clientAddress: '0x6666666666666666666666666666666666666666',
       providerAddress: '0x2222222222222222222222222222222222222222',
       evaluatorAddress: '0x7777777777777777777777777777777777777777',
@@ -260,11 +276,16 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!reachable) return;
   /*
-   * Jobs go first and by chain, not by cascade. The agent foreign key is `on delete set null`,
-   * because a job is real whether or not we can attribute it, so deleting the agents would
-   * leave these rows behind unattributed rather than remove them.
+   * Jobs go first, and by agent rather than by cascade or by chain.
+   *
+   * Not by cascade, because the agent foreign key is `on delete set null`: a job is real whether
+   * or not we can attribute it, so deleting the agents would strand these rows unattributed
+   * instead of removing them.
+   *
+   * Not by chain, because these fixtures carry the real chain id, so a chain-wide delete would
+   * take 56,680 indexed jobs with them.
    */
-  await handle.db.delete(agentJobs).where(eq(agentJobs.chainId, TEST_CHAIN));
+  await handle.db.delete(agentJobs).where(eq(agentJobs.agentId, REBALANCER));
   // Cascades remove the category and reputation rows.
   await handle.db.delete(agents).where(eq(agents.chainId, TEST_CHAIN));
   await app.close();

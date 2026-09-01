@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import type { Database } from '../../infrastructure/database/client.js';
 import { agentJobs, type AgentJobRow } from '../../infrastructure/database/schema.js';
+import { REGISTRY_CHAIN } from '../../integrations/bsc-client.js';
 import {
   FIRST_TERMINAL_STATUS,
   JOB_STATUS_INDEX,
@@ -66,6 +67,20 @@ export interface JobRepository {
   summariesForAgents(agentIds: readonly string[]): Promise<Map<string, JobSummary>>;
   listForAgent(agentId: string, limit: number): Promise<AgentJobRow[]>;
 }
+
+/**
+ * Evidence counts the registry's chain and nothing else.
+ *
+ * This table can hold jobs from two chains. Indexing writes the chain the catalogue was built
+ * from; a hire recorded through the hiring module writes the chain the user's session is on, which
+ * on testnet is a different one.
+ *
+ * In production they are the same chain and a real hire becomes part of the agent's record, which
+ * is the intent. On testnet a hire is a rehearsal against a kernel where the agent is not even
+ * registered, so counting it would put a job nobody commissioned in earnest into an agent's
+ * delivery history. Stated once here rather than remembered at each call site.
+ */
+const evidenceChain = eq(agentJobs.chainId, REGISTRY_CHAIN.id);
 
 /**
  * Normalises whatever the driver hands back for `max(timestamptz)`.
@@ -228,7 +243,7 @@ export function createJobRepository(db: Database): JobRepository {
       const [row] = await db
         .select(summaryColumns)
         .from(agentJobs)
-        .where(eq(agentJobs.agentId, agentId));
+        .where(and(eq(agentJobs.agentId, agentId), evidenceChain));
 
       return {
         total: row?.total ?? 0,
@@ -248,7 +263,7 @@ export function createJobRepository(db: Database): JobRepository {
       const rows = await db
         .select({ agentId: agentJobs.agentId, ...summaryColumns })
         .from(agentJobs)
-        .where(inArray(agentJobs.agentId, [...agentIds]))
+        .where(and(inArray(agentJobs.agentId, [...agentIds]), evidenceChain))
         .groupBy(agentJobs.agentId);
 
       for (const row of rows) {
@@ -273,7 +288,7 @@ export function createJobRepository(db: Database): JobRepository {
       return db
         .select()
         .from(agentJobs)
-        .where(eq(agentJobs.agentId, agentId))
+        .where(and(eq(agentJobs.agentId, agentId), evidenceChain))
         .orderBy(desc(agentJobs.jobId))
         .limit(limit);
     },

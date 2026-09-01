@@ -64,8 +64,18 @@ async function pickRpc(): Promise<string> {
   throw new Error('no BSC testnet RPC endpoint answered');
 }
 
-/** A provider that already exists on testnet, so the job names something real. */
-const PROVIDER = '0x1614f31E3DC2FC334C4C9742DE233265591f7674';
+/**
+ * Who the job names as provider.
+ *
+ * Overridable with ERC8183_PROVIDER so a run can name an indexed agent's own wallet address and
+ * the result can then be recorded through `POST /agents/:id/jobs`, which checks exactly that the
+ * provider is the agent it is being recorded against.
+ *
+ * The default is a provider that already exists on testnet, so a bare run still names something
+ * real rather than an address nobody controls.
+ */
+const PROVIDER = (process.env.ERC8183_PROVIDER ??
+  '0x1614f31E3DC2FC334C4C9742DE233265591f7674') as `0x${string}`;
 
 const SESSION_MINUTES = 30;
 

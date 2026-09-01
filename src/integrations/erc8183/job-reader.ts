@@ -194,17 +194,39 @@ function toJobRead(raw: RawJob, chainId: number): JobRead {
 export interface JobReaderOptions {
   env: Env;
   logger: Logger;
-  /** Shared with the registry reader when one is already open. */
-  client?: PublicClient;
+  /**
+   * Shared with the registry reader when one is already open, or a getter for one.
+   *
+   * A getter because the Altana network picks its endpoint by probing, so its client only exists
+   * after a round trip. Resolving that at construction would put an RPC call in the server's
+   * startup path for a feature that may never be used.
+   */
+  client?: PublicClient | (() => Promise<PublicClient>);
+  /**
+   * Which chain's kernel to read, defaulting to the registry's.
+   *
+   * Overridable because two callers want different chains for good reasons. Indexing must read
+   * the chain the catalogue was built from, or provider addresses would be matched to agents that
+   * live somewhere else. Hiring must read the chain the user's session is on, because that is
+   * where their job will exist. In production those are the same chain and this is redundant; on
+   * testnet they are not, and collapsing them would either index nothing or verify the wrong
+   * kernel.
+   */
+  chainId?: number;
+  /** Explorer base for `chainId`, when it is not the registry's chain. */
+  explorerUrl?: string;
 }
 
 export function createErc8183JobReader({
   env,
   logger,
   client: shared,
+  chainId: chainIdOverride,
+  explorerUrl: explorerOverride,
 }: JobReaderOptions): Erc8183JobReader {
-  const client = shared ?? createBscClient(env);
-  const chainId = REGISTRY_CHAIN.id;
+  const getClient =
+    typeof shared === 'function' ? shared : (): Promise<PublicClient> => Promise.resolve(shared ?? createBscClient(env));
+  const chainId = chainIdOverride ?? REGISTRY_CHAIN.id;
   const addresses = erc8183Addresses(chainId);
 
   /**
@@ -218,6 +240,8 @@ export function createErc8183JobReader({
 
   const resolvePolicy = async (): Promise<EscrowPolicy> => {
     try {
+      const client = await getClient();
+
       for (const candidate of [addresses.policy, OBSERVED_TESTNET_POLICY]) {
         const whitelisted = await client.readContract({
           address: addresses.router,
@@ -263,11 +287,11 @@ export function createErc8183JobReader({
   return {
     chainId,
     addresses,
-    explorerUrl: REGISTRY_CHAIN.blockExplorers.default.url,
+    explorerUrl: explorerOverride ?? REGISTRY_CHAIN.blockExplorers.default.url,
 
     async jobCounter() {
       try {
-        const counter = await client.readContract({
+        const counter = await (await getClient()).readContract({
           address: addresses.commerce,
           abi: commerceAbi,
           functionName: 'jobCounter',
@@ -290,6 +314,7 @@ export function createErc8183JobReader({
         chunks.push([...ids.slice(i, i + JOB_MULTICALL_CHUNK)]);
       }
 
+      const client = await getClient();
       const out: JobRead[] = [];
       let absent = 0;
 
