@@ -1,0 +1,169 @@
+name: Restore the deployed catalogue
+
+# Loads a snapshot of the local catalogue into the deployed database.
+#
+# WHY THIS RUNS IN CI RATHER THAN ON A LAPTOP
+#
+# docs/deployment.md describes this as a local pg_restore, and that instruction is one blocked
+# port away from being useless. Plenty of networks drop outbound 5432: the TCP handshake
+# completes, the Postgres startup packet is discarded, and every client reports only
+#
+#   server closed the connection unexpectedly
+#
+# which is indistinguishable from a crashed server, a wrong password or an exhausted quota. That
+# ambiguity cost a day of this project. The restore now runs somewhere with unrestricted egress,
+# so the operation no longer depends on whose network the operator happens to be on.
+#
+# It also makes the refresh reproducible. The previous procedure existed only as prose, so every
+# run was a fresh chance to forget that the dump does not create schema public.
+#
+# HOW THE SNAPSHOT GETS HERE
+#
+# scripts/snapshot.sh writes a ~27 MB custom-format dump locally. Upload it as an asset on a
+# release, which travels over 443 and is therefore unaffected by the block above:
+#
+#   gh release create snapshot-latest /tmp/kattegat-snapshot-new.dump --notes '...'
+#
+# Not a draft: a draft is reachable only by listing releases, which complicates the token's
+# access for no benefit here. The repository is private, so a published release is visible only
+# to people who can already read the code. It is still a full copy of the catalogue, so delete
+# the release once the restore is verified.
+#
+# DESTRUCTIVE
+#
+# This drops both schemas and rebuilds them. Manual dispatch only, never scheduled, and it
+# refuses to run unless the confirmation input matches exactly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag holding the .dump asset'
+        required: true
+        default: 'snapshot-latest'
+      confirm:
+        description: 'Type RESTORE to confirm this erases the deployed database'
+        required: true
+        default: ''
+
+concurrency:
+  group: restore-catalogue
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Refuse unless the confirmation matches
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRM" != "RESTORE" ]; then
+            echo "::error::Refusing to run. The confirm input must be exactly RESTORE."
+            exit 1
+          fi
+
+      # The dump is written by pg_dump 18, and pg_restore refuses an archive newer than itself.
+      # ubuntu-latest ships the 16 client, so the matching major comes from PGDG.
+      - name: Install the PostgreSQL 18 client
+        run: |
+          set -euo pipefail
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-18
+          /usr/lib/postgresql/18/bin/pg_restore --version
+
+      - name: Fetch the snapshot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.dump' --dir /tmp
+          DUMP=$(ls /tmp/*.dump | head -1)
+          echo "DUMP=$DUMP" >> "$GITHUB_ENV"
+          ls -lh "$DUMP"
+
+      - name: Reset the schemas
+        env:
+          DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          export PATH="/usr/lib/postgresql/18/bin:$PATH"
+
+          # CREATE SCHEMA public is not optional. pg_dump emits CREATE SCHEMA drizzle but never
+          # CREATE SCHEMA public, because Postgres treats it as pre-existing. Dropping it without
+          # recreating it fails the restore once per object with
+          # `schema "public" does not exist`, having loaded nothing.
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          DROP SCHEMA IF EXISTS drizzle CASCADE;
+          DROP SCHEMA IF EXISTS public CASCADE;
+          CREATE SCHEMA public;
+          SQL
+
+          psql "$DATABASE_URL" -tAc \
+            "select 'schemas now: ' || coalesce(string_agg(nspname, ', '), 'none')
+             from pg_namespace where nspname in ('public','drizzle')"
+
+      - name: Restore
+        env:
+          DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          export PATH="/usr/lib/postgresql/18/bin:$PATH"
+
+          # -j 1 deliberately. Parallel restore opens a connection per worker and multiplies peak
+          # WAL, and the target is a 1 GB free instance holding a 432 MB database. Serial is
+          # slower and stays inside the disk.
+          #
+          # --no-owner/--no-privileges because the dump's roles do not exist on the host.
+          pg_restore \
+            --no-owner --no-privileges \
+            --exit-on-error \
+            -j 1 \
+            -d "$DATABASE_URL" \
+            "$DUMP"
+
+      # pg_restore does not do this, and without it the planner has no statistics and
+      # sequential-scans tables that have perfectly good indexes.
+      - name: Analyze
+        env:
+          DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          export PATH="/usr/lib/postgresql/18/bin:$PATH"
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "ANALYZE;"
+
+      - name: Verify
+        env:
+          DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          export PATH="/usr/lib/postgresql/18/bin:$PATH"
+
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          \pset border 2
+          SELECT 'agents'            AS table, count(*) FROM agents
+          UNION ALL SELECT 'agent_categories', count(*) FROM agent_categories
+          UNION ALL SELECT 'agent_reputation', count(*) FROM agent_reputation
+          UNION ALL SELECT 'agent_jobs',       count(*) FROM agent_jobs
+          UNION ALL SELECT 'migrations',       count(*) FROM drizzle.__drizzle_migrations;
+          SELECT pg_size_pretty(pg_database_size(current_database())) AS size;
+          SQL
+
+          # An empty agents table means the restore reported success and moved nothing, which has
+          # happened before via an ignored error, so it fails the job rather than being read past.
+          count=$(psql "$DATABASE_URL" -tAc "select count(*) from agents")
+          echo "agents restored: $count"
+          if [ "$count" -lt 300000 ]; then
+            echo "::error::Expected at least 300,000 agents, got $count"
+            exit 1
+          fi
