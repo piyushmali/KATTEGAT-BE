@@ -2,11 +2,12 @@
   "name": "kattegat-be",
   "version": "0.1.0",
   "private": true,
-  "description": "KATTEGAT backend — discovery, evaluation and trust layer for autonomous agents on BNB Smart Chain",
+  "description": "KATTEGAT backend \u2014 discovery, evaluation and trust layer for autonomous agents on BNB Smart Chain",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
     "build": "tsc --project tsconfig.build.json",

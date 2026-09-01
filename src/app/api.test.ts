@@ -632,6 +632,35 @@ describe('ERC-8183 job evidence', () => {
   });
 });
 
+describe('CORS preflight', () => {
+  it('allows the methods the API actually exposes, including DELETE', async () => {
+    guard();
+
+    /*
+     * The regression this exists for. `methods` listed only GET, POST and OPTIONS while
+     * revocation is a DELETE, so a browser's preflight omitted it and confirming a revocation
+     * failed from the site while every curl test passed — curl sends no preflight.
+     *
+     * Worth a test because of which endpoint it was. Confirming a revocation is the call that
+     * tells a user their agent's authority has ended, so a transport-level block there is the
+     * worst place in this API for a failure nobody sees.
+     */
+    const response = await app.inject({
+      method: 'OPTIONS',
+      url: '/api/v1/sessions/0x04aa',
+      headers: {
+        origin: 'http://localhost:3000',
+        'access-control-request-method': 'DELETE',
+      },
+    });
+
+    const allowed = String(response.headers['access-control-allow-methods'] ?? '');
+    for (const method of ['GET', 'POST', 'DELETE']) {
+      expect(allowed).toContain(method);
+    }
+  });
+});
+
 describe('GET /api/v1/categories', () => {
   it('lists every taxonomy category, including empty ones', async () => {
     guard();

@@ -218,7 +218,16 @@ export async function buildServer({
   await app.register(cors, {
     origin: env.CORS_ORIGINS,
     credentials: true,
-    methods: ['GET', 'POST', 'OPTIONS'],
+    /*
+     * DELETE is here because revoking a session uses it, and leaving it out broke revocation in
+     * a browser while every curl test kept passing: the preflight simply omitted the method, so
+     * the failure appeared in the console of a page nobody had opened yet.
+     *
+     * Worth stating because of which endpoint it was. Confirming a revocation is the one call
+     * that tells a user their agent's authority has ended, so a transport-level block there is
+     * the most dangerous place in this API for a silent failure.
+     */
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   });
 
   await app.register(rateLimit, {
