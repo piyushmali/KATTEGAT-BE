@@ -6,6 +6,7 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgTable,
   primaryKey,
   real,
@@ -17,11 +18,16 @@ import {
 /**
  * KATTEGAT marketplace schema.
  *
- * Deliberately small. Four tables cover the whole bootstrap: the normalised
- * agent record, the categories KATTEGAT derives for it, the reputation snapshot
- * read from chain, and the ingestion cursor. Hiring, sessions, permissions and
- * comparisons are real product concepts but have no MVP behaviour yet, so they
- * are documented in docs/data-model.md rather than created empty here.
+ * Deliberately small, and split by who owns the truth.
+ *
+ * Read from chain, mirrored here only so a page load is not a registry decode: the agent
+ * record, its reputation snapshot, the sessions granted against it, and the ERC-8183 jobs it
+ * was paid for. If any of these disagree with chain, chain is right.
+ *
+ * Ours: the categories the classifier derives, and the ingestion cursor.
+ *
+ * Permissions and comparisons are real product concepts with no behaviour yet, so they are
+ * documented in docs/data-model.md rather than created empty here.
  */
 
 /*
@@ -269,12 +275,118 @@ export const agentSessions = pgTable(
   ],
 );
 
+/**
+ * ERC-8183 jobs: escrowed work an agent was actually paid for.
+ *
+ * The strongest evidence this marketplace can show. Reputation is what clients said about an
+ * agent; a job is a budget that was escrowed on chain, delivered against, and released. Both
+ * are read from chain, neither is ours to invent.
+ *
+ * A mirror of the AgenticCommerce kernel, not a record of anything KATTEGAT did. Rows appear
+ * for jobs created by anyone, through any client, and a hire placed through KATTEGAT lands
+ * here the same way a hire placed through the BNB Agent Studio CLI does.
+ *
+ * ATTRIBUTION IS DELIBERATELY INCOMPLETE
+ *
+ * `agentId` is null unless the provider address resolves to exactly one indexed agent. The
+ * kernel names a provider address, not an agent id, and addresses are reused: one address in
+ * the sample is the wallet of 768 different agents. Crediting a job to all of them, or
+ * picking one, would manufacture a delivery history. So an unresolvable provider stays
+ * unattributed and the job still counts as real escrow activity, just not as any particular
+ * agent's track record.
+ */
+export const agentJobs = pgTable(
+  'agent_jobs',
+  {
+    /** `${chainId}:${jobId}` — job ids restart per deployment, so the chain is part of it. */
+    id: text('id').primaryKey(),
+
+    chainId: integer('chain_id').notNull(),
+    /** Kernel job id, 1-indexed from `jobCounter`. Sequential, so a number is safe. */
+    jobId: bigint('job_id', { mode: 'number' }).notNull(),
+
+    /** Who paid. */
+    clientAddress: text('client_address').notNull(),
+    /** Who was hired. An address, which is why `agentId` above can be null. */
+    providerAddress: text('provider_address').notNull(),
+    /**
+     * Who alone may mark the job complete.
+     *
+     * Stored because it decides whether the escrow means anything. The standard stack points
+     * every job at the EvaluatorRouter with an optimistic policy; a job pointing somewhere
+     * else settles under rules we have not seen, and flattening that difference would present
+     * both as equally trustworthy.
+     */
+    evaluatorAddress: text('evaluator_address').notNull(),
+
+    /**
+     * Escrowed budget in raw $U units (18 decimals).
+     *
+     * `numeric` rather than text because these get summed for an agent's settled total, and
+     * Postgres numeric sums exactly. Text would need the addition done in JS, where 18
+     * decimals of $U exceeds what a float holds without losing the low digits.
+     */
+    budgetRaw: numeric('budget_raw', { precision: 78, scale: 0 }).notNull(),
+
+    /**
+     * Kernel status index, stored as the chain reports it: 0 OPEN, 1 FUNDED, 2 SUBMITTED,
+     * 3 COMPLETED, 4 REJECTED, 5 EXPIRED.
+     *
+     * The integer only. The SDK's `JOB_STATUS` already names these, so keeping a name column
+     * beside it would be a second copy of the same enum, free to drift.
+     */
+    status: integer('status').notNull(),
+
+    /** The task text, or an anchored signed quote. Up to 4096 bytes by kernel rule. */
+    description: text('description').notNull(),
+
+    expiredAt: timestamp('expired_at', { withTimezone: true }).notNull(),
+    /** Null until the provider submits. */
+    submittedAt: timestamp('submitted_at', { withTimezone: true }),
+    /**
+     * The provider's commitment to what it delivered. Null while unset, not 32 zero bytes.
+     *
+     * There is no companion URL column on purpose. See the note on `deliverableHash` in
+     * integrations/erc8183/job-reader.ts: the one mechanism for publishing a deliverable link
+     * resolved nothing across a spread of 16 submitted mainnet jobs, so the column was dropped
+     * rather than left permanently null beside figures that are real.
+     */
+    deliverableHash: text('deliverable_hash'),
+
+    /** Set only when the provider address resolves to exactly one agent. See the note above. */
+    agentId: text('agent_id').references(() => agents.id, { onDelete: 'set null' }),
+
+    lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('agent_jobs_chain_job_idx').on(table.chainId, table.jobId),
+    /* The hot query: this agent's jobs, newest first. */
+    index('agent_jobs_agent_idx').on(table.agentId, table.jobId.desc()),
+    /* Provider lookups, and re-attribution once a previously unknown agent is indexed. */
+    index('agent_jobs_provider_idx').on(table.providerAddress),
+    /*
+     * Serves the refresh pass. A job's status changes under us as the provider submits and
+     * the escrow releases, so non-terminal rows have to be re-read. Partial on exactly those
+     * statuses, so a job reaching a terminal state leaves the index instead of being carried
+     * in it forever: COMPLETED, REJECTED and EXPIRED never change again.
+     */
+    index('agent_jobs_pending_idx')
+      .on(table.chainId, table.jobId)
+      .where(sql`${table.status} < 3`),
+  ],
+);
+
 export const agentsRelations = relations(agents, ({ many, one }) => ({
   categories: many(agentCategories),
+  jobs: many(agentJobs),
   reputation: one(agentReputation, {
     fields: [agents.id],
     references: [agentReputation.agentId],
   }),
+}));
+
+export const agentJobsRelations = relations(agentJobs, ({ one }) => ({
+  agent: one(agents, { fields: [agentJobs.agentId], references: [agents.id] }),
 }));
 
 export const agentCategoriesRelations = relations(agentCategories, ({ one }) => ({
@@ -292,3 +404,5 @@ export type AgentReputationRow = typeof agentReputation.$inferSelect;
 export type SyncStateRow = typeof syncState.$inferSelect;
 export type AgentSessionRow = typeof agentSessions.$inferSelect;
 export type NewAgentSessionRow = typeof agentSessions.$inferInsert;
+export type AgentJobRow = typeof agentJobs.$inferSelect;
+export type NewAgentJobRow = typeof agentJobs.$inferInsert;

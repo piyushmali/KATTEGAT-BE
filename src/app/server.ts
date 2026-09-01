@@ -26,10 +26,14 @@ import { createCategoryService, type CategoryService } from '../modules/categori
 import { categoryRoutes } from '../modules/categories/category.routes.js';
 import { createGasSponsor } from '../integrations/altana/gas-sponsor.js';
 import { createKeystoreReader } from '../integrations/altana/keystore.js';
-import { resolveNetwork } from '../integrations/altana/network.js';
+import { createNetworkReader, resolveNetwork } from '../integrations/altana/network.js';
 import { createHiringRepository } from '../modules/hiring/hiring.repository.js';
 import { hiringRoutes } from '../modules/hiring/hiring.routes.js';
 import { createHiringService, type HiringService } from '../modules/hiring/hiring.service.js';
+import { createErc8183JobReader } from '../integrations/erc8183/job-reader.js';
+import { createJobRepository } from '../modules/jobs/job.repository.js';
+import { jobRoutes } from '../modules/jobs/job.routes.js';
+import { createJobService, type JobService } from '../modules/jobs/job.service.js';
 import { createReputationRepository } from '../modules/reputation/reputation.repository.js';
 import {
   createReputationService,
@@ -51,6 +55,7 @@ export interface AppServices {
   agents: AgentService;
   categories: CategoryService;
   hiring: HiringService;
+  jobs: JobService;
   reputation: ReputationService;
   search: SearchService;
   stats: StatsService;
@@ -135,9 +140,44 @@ export async function buildServer({
   const altanaNetwork = resolveNetwork(env.ALTANA_NETWORK);
   const altanaKeystore = createKeystoreReader(altanaNetwork, logger);
 
+  /*
+   * ERC-8183 on the session's chain, for hiring.
+   *
+   * A second reader rather than reusing the indexing one, because a hire lands on whatever chain
+   * the user's session lives on and verification has to read that kernel. Sharing the indexer's
+   * reader would verify jobs against the wrong chain whenever `ALTANA_NETWORK` is not the
+   * registry's, which is exactly the case on testnet.
+   *
+   * Takes a client getter, not a client: the Altana network picks its RPC endpoint by probing, and
+   * doing that at construction would put a round trip in the startup path.
+   */
+  const altanaReader = createNetworkReader(altanaNetwork, logger);
+  const hiringEscrow = createErc8183JobReader({
+    env,
+    logger,
+    client: () => altanaReader.client(),
+    chainId: altanaNetwork.config.chainId,
+    explorerUrl: altanaNetwork.config.explorer,
+  });
+
+  /*
+   * ERC-8183 escrow, read from the same chain as the registry rather than from `ALTANA_NETWORK`.
+   *
+   * Deliberately not the session network. Jobs are linked to agents by provider address, and an
+   * address only means one thing within one chain, so reading escrow from a chain other than the
+   * one the catalogue was indexed from would produce links that are not real.
+   */
+  const jobRepository = createJobRepository(db);
+  const jobReader = createErc8183JobReader({ env, logger });
+
   app.decorate('services', {
-    agents: createAgentService(agentRepository),
+    agents: createAgentService(agentRepository, jobRepository),
     categories: createCategoryService(createCategoryRepository(db)),
+    jobs: createJobService({
+      repository: jobRepository,
+      agents: agentRepository,
+      reader: jobReader,
+    }),
     reputation: createReputationService({
       repository: createReputationRepository(db),
       source: chainReader,
@@ -146,6 +186,7 @@ export async function buildServer({
     }),
     search: createSearchService({
       repository: agentRepository,
+      jobs: jobRepository,
       ai: createAiProvider(env),
       logger,
     }),
@@ -162,6 +203,8 @@ export async function buildServer({
         logger,
       }),
       network: altanaNetwork,
+      escrow: hiringEscrow,
+      jobs: jobRepository,
       logger,
     }),
   } satisfies AppServices);
@@ -224,6 +267,7 @@ export async function buildServer({
   await app.register(agentRoutes, { prefix: API_PREFIX });
   await app.register(categoryRoutes, { prefix: API_PREFIX });
   await app.register(hiringRoutes, { prefix: API_PREFIX });
+  await app.register(jobRoutes, { prefix: API_PREFIX });
   await app.register(reputationRoutes, { prefix: API_PREFIX });
   await app.register(searchRoutes, { prefix: API_PREFIX });
   await app.register(statsRoutes, { prefix: API_PREFIX });

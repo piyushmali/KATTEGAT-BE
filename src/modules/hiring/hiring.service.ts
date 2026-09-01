@@ -2,11 +2,23 @@ import type { Logger } from 'pino';
 import type { Address, Hex } from 'viem';
 import { badRequest, notFound } from '../../shared/errors.js';
 import type { GasSponsor } from '../../integrations/altana/gas-sponsor.js';
+import { REGISTRY_CHAIN } from '../../integrations/bsc-client.js';
+import {
+  JOB_STATUS_INDEX,
+  PAYMENT_TOKEN,
+  type Erc8183JobReader,
+} from '../../integrations/erc8183/job-reader.js';
+import type { JobRepository } from '../jobs/job.repository.js';
 import type { KeystoreReader } from '../../integrations/altana/keystore.js';
 import type { ResolvedNetwork } from '../../integrations/altana/network.js';
 import type { AgentSessionRow } from '../../infrastructure/database/schema.js';
 import type { HiringRepository } from './hiring.repository.js';
-import type { AgentSessionResponse, RecordSessionBody } from './hiring.schema.js';
+import type {
+  AgentSessionResponse,
+  RecordJobBody,
+  RecordedJobResponse,
+  RecordSessionBody,
+} from './hiring.schema.js';
 
 /**
  * Hiring: recording authority the user granted, and following it as it changes.
@@ -34,12 +46,26 @@ export interface HiringService {
   listForAgent(agentId: string): Promise<HiringList>;
   /** Confirms a revocation the browser performed. Never performs one. */
   confirmRevoked(publicKey: string): Promise<AgentSessionResponse>;
+  /** Verifies and records an escrowed job the browser funded. Never funds one. */
+  recordJob(agentId: string, body: RecordJobBody): Promise<RecordJobResult>;
   sponsorGas(walletAddress: string): Promise<{
     transaction_hash: string | null;
     amount_wei: string | null;
     sponsor_address: string | null;
     sponsored: boolean;
   }>;
+}
+
+interface EscrowContext {
+  available: boolean;
+  commerce_address: string;
+  router_address: string;
+  policy_address: string;
+  payment_token_address: string;
+  payment_token_symbol: string;
+  payment_token_decimals: number;
+  dispute_window_seconds: number;
+  allowed_targets: string[];
 }
 
 interface HiringContext {
@@ -51,6 +77,7 @@ interface HiringContext {
   explorer_url: string;
   keystore_address: string;
   gas_sponsored: boolean;
+  escrow: EscrowContext;
 }
 
 interface HiringResult {
@@ -63,11 +90,26 @@ interface HiringList {
   meta: HiringContext;
 }
 
+interface RecordJobResult {
+  data: RecordedJobResponse;
+  meta: HiringContext;
+}
+
 export interface HiringServiceDeps {
   repository: HiringRepository;
   keystore: KeystoreReader;
   sponsor: GasSponsor;
   network: ResolvedNetwork;
+  /**
+   * ERC-8183 on the session's chain, not on the registry's.
+   *
+   * A hire lands wherever the user's session lives, so verification has to read that kernel. In
+   * production it is the same chain the catalogue was indexed from; on testnet it is not, which is
+   * what `counts_as_evidence` on the response is about.
+   */
+  escrow: Erc8183JobReader;
+  /** Writes the verified job. The same table the indexer writes, and the same shape. */
+  jobs: Pick<JobRepository, 'save' | 'reattribute'>;
   logger: Logger;
 }
 
@@ -78,9 +120,36 @@ export function createHiringService({
   keystore,
   sponsor,
   network,
+  escrow,
+  jobs,
   logger,
 }: HiringServiceDeps): HiringService {
-  const context = (): HiringContext => ({
+  const escrowContext = async (): Promise<EscrowContext> => {
+    const policy = await escrow.escrowPolicy();
+
+    return {
+      available: policy.usable,
+      commerce_address: escrow.addresses.commerce,
+      router_address: escrow.addresses.router,
+      policy_address: policy.address,
+      payment_token_address: escrow.addresses.paymentToken,
+      payment_token_symbol: PAYMENT_TOKEN.symbol,
+      payment_token_decimals: PAYMENT_TOKEN.decimals,
+      dispute_window_seconds: policy.disputeWindowSeconds,
+      /*
+       * Exactly the contracts a hire touches, and no more. The browser grants a session over this
+       * list, so anything missing here breaks the batch partway and anything extra widens what the
+       * key can do beyond commissioning work.
+       */
+      allowed_targets: [
+        escrow.addresses.commerce,
+        escrow.addresses.router,
+        escrow.addresses.paymentToken,
+      ],
+    };
+  };
+
+  const context = async (): Promise<HiringContext> => ({
     enabled: true,
     chain_id: network.config.chainId,
     network: network.name,
@@ -89,6 +158,7 @@ export function createHiringService({
     explorer_url: network.config.explorer,
     keystore_address: network.config.keyStore,
     gas_sponsored: sponsor.enabled,
+    escrow: await escrowContext(),
   });
 
   /**
@@ -178,7 +248,7 @@ export function createHiringService({
       });
 
       logger.info({ agentId, publicKey: row.publicKey }, 'agent hired');
-      return { data: await toWire(row), meta: context() };
+      return { data: await toWire(row), meta: await context() };
     },
 
     async listForAgent(agentId) {
@@ -189,7 +259,7 @@ export function createHiringService({
       const rows = await repository.listForAgent(agentId);
       return {
         data: await Promise.all(rows.map(toWire)),
-        meta: context(),
+        meta: await context(),
       };
     },
 
@@ -218,6 +288,86 @@ export function createHiringService({
       const row = (await repository.markRevoked(publicKey, null)) ?? existing;
       logger.info({ publicKey }, 'revocation confirmed on chain');
       return toWire(row);
+    },
+
+    /**
+     * Records an escrowed job the browser funded.
+     *
+     * The same shape of endpoint as `recordSession`, and for the same reason: the backend holds no
+     * key, so it cannot commission work. The user's session signed the batch; this verifies the
+     * result against the kernel and writes it down.
+     *
+     * Three checks, and each one exists because skipping it would let a request state something
+     * untrue about an agent.
+     */
+    async recordJob(agentId, body) {
+      const agent = await repository.findAgent(agentId);
+      if (agent === null) {
+        throw notFound(`No agent with id "${agentId}" has been indexed.`);
+      }
+
+      const [job] = await escrow.readJobs([body.job_id]);
+
+      /*
+       * 1. The job exists. Not a formality: reading an unminted id returns a zero-filled tuple
+       *    rather than reverting, so `readJobs` drops anything whose id does not come back
+       *    matching. Without that, any id at all would look like an open job with no budget.
+       */
+      if (job === undefined) {
+        throw badRequest(`Job ${String(body.job_id)} does not exist on chain ${String(escrow.chainId)}.`);
+      }
+
+      /*
+       * 2. The job names this agent. The kernel identifies a provider by address, so this is what
+       *    stops a real job for one agent being recorded against another. Compared to the agent's
+       *    own wallet address, which is also what the indexer attributes by.
+       */
+      if (agent.walletAddress === null) {
+        throw badRequest('That agent publishes no wallet address, so a job cannot be tied to it.');
+      }
+      if (job.providerAddress !== agent.walletAddress.toLowerCase()) {
+        throw badRequest(
+          `Job ${String(body.job_id)} names ${job.providerAddress} as its provider, which is not this agent.`,
+        );
+      }
+
+      /*
+       * 3. The escrow was funded. An OPEN job costs nothing to create and needs no agreement from
+       *    the agent, so recording one would let anyone add to an agent's history for free.
+       */
+      if (job.status <= JOB_STATUS_INDEX.open) {
+        throw badRequest(
+          'That job has not been funded yet, so there is nothing escrowed to record. Fund it and try again.',
+        );
+      }
+
+      await jobs.save([job]);
+      const relinked = await jobs.reattribute();
+
+      logger.info(
+        { agentId, jobId: job.jobId, chainId: job.chainId, status: job.statusName, relinked },
+        'escrowed job recorded',
+      );
+
+      return {
+        data: {
+          job_id: job.jobId,
+          chain_id: job.chainId,
+          status: job.statusName,
+          client_address: job.clientAddress,
+          provider_address: job.providerAddress,
+          budget_raw: job.budgetRaw,
+          description: job.description,
+          expired_at: iso(job.expiredAt),
+          /*
+           * Only when the hire happened on the chain the catalogue was indexed from. On testnet it
+           * did not, and the agent is not registered on that kernel, so presenting the job as part
+           * of its record would be manufacturing one.
+           */
+          counts_as_evidence: job.chainId === REGISTRY_CHAIN.id,
+        },
+        meta: await context(),
+      };
     },
 
     async sponsorGas(walletAddress) {

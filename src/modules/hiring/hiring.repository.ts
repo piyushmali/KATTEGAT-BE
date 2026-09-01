@@ -23,6 +23,13 @@ import {
 export interface HiringRepository {
   /** Null when the agent is not indexed, which is a 404 rather than a failed grant. */
   agentExists(agentId: string): Promise<boolean>;
+  /**
+   * The agent's own wallet address, which is how the escrow kernel names it as a provider.
+   *
+   * Null either when the agent is not indexed or when it published no wallet. The caller has to
+   * tell those apart, so it gets the row rather than just the address.
+   */
+  findAgent(agentId: string): Promise<{ walletAddress: string | null } | null>;
   record(session: NewAgentSessionRow): Promise<AgentSessionRow>;
   listForAgent(agentId: string): Promise<AgentSessionRow[]>;
   findByPublicKey(publicKey: string): Promise<AgentSessionRow | null>;
@@ -40,6 +47,15 @@ export function createHiringRepository(db: Database): HiringRepository {
         .where(eq(agents.id, agentId))
         .limit(1);
       return row !== undefined;
+    },
+
+    async findAgent(agentId) {
+      const [row] = await db
+        .select({ walletAddress: agents.walletAddress })
+        .from(agents)
+        .where(eq(agents.id, agentId))
+        .limit(1);
+      return row ?? null;
     },
 
     async record(session) {

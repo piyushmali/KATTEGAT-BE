@@ -1,3 +1,5 @@
+import { toWireJobSummary } from '../jobs/job.mapper.js';
+import type { JobRepository, JobSummary } from '../jobs/job.repository.js';
 import type { AgentSummary } from './agent.types.js';
 import type { AgentSummaryResponse } from './agent.schema.js';
 
@@ -11,7 +13,30 @@ import type { AgentSummaryResponse } from './agent.schema.js';
 
 const iso = (value: Date | null): string | null => value?.toISOString() ?? null;
 
-export function toWireAgent(agent: AgentSummary): AgentSummaryResponse {
+/**
+ * Maps a page of agents and attaches each one's escrow history.
+ *
+ * A function rather than leaving callers to `.map(toWireAgent)` with their own lookup, because
+ * both the browse list and search return agents and job evidence has to appear on both. An
+ * agent that shows delivered work when browsed and none when searched would look like the
+ * evidence was made up.
+ *
+ * It also removes a trap. `agents.map(toWireAgent)` passes the array index as the second
+ * argument, so widening the mapper to take a second parameter would silently hand it `0`, `1`,
+ * `2` as job summaries.
+ */
+export async function toWireAgentPage(
+  agents: readonly AgentSummary[],
+  jobs: Pick<JobRepository, 'summariesForAgents'>,
+): Promise<AgentSummaryResponse[]> {
+  const summaries = await jobs.summariesForAgents(agents.map((agent) => agent.identity.id));
+  return agents.map((agent) => toWireAgent(agent, summaries.get(agent.identity.id) ?? null));
+}
+
+export function toWireAgent(
+  agent: AgentSummary,
+  jobs: JobSummary | null = null,
+): AgentSummaryResponse {
   return {
     identity: {
       id: agent.identity.id,
@@ -54,5 +79,6 @@ export function toWireAgent(agent: AgentSummary): AgentSummaryResponse {
           computed_at: agent.reputation.computedAt.toISOString(),
         }
       : null,
+    jobs: jobs === null ? null : toWireJobSummary(jobs),
   };
 }

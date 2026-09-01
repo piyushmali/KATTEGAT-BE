@@ -1,0 +1,1 @@
+ALTER TABLE "agent_jobs" DROP COLUMN "deliverable_url";
