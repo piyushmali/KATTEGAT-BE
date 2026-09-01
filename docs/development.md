@@ -52,16 +52,22 @@ pnpm sync:agents --jobs --refresh --loop # re-read jobs that have not settled ye
 ### Running against the deployed database
 
 ```bash
-pnpm dev        # local Postgres, the default
-pnpm dev:neon   # the deployed database, read from .env.neon
+pnpm dev            # local Postgres, the default
+pnpm dev:deployed   # the deployed database, read from .env.deployed
 ```
 
 Two commands rather than editing `DATABASE_URL`, so which database is in play is a
 choice made per invocation instead of a line someone changed and forgot. Every
 ingestion command keeps using the local value whatever the API is pointed at,
-which is the point: the deployed catalogue is a snapshot on a 512 MB free tier and
+which is the point: the deployed catalogue is a snapshot on a 1 GB free tier and
 the registry grows ~130 MB a month, so ingestion writing there is a decision with a
 deadline rather than a default. See [`deployment.md`](deployment.md).
+
+`dev:deployed` needs outbound 5432, which not every network allows. If it reports
+`server closed the connection unexpectedly`, test a Postgres you know is healthy
+before assuming the deployed one is broken; that error is what a blocked port looks
+like and it is indistinguishable from a crashed server. Schema changes and restores
+do not depend on this working, because they run from CI.
 
 **Which one to run.** Incremental replays logs and is bounded by the endpoint's log
 retention — roughly two hours on any free tier, so it only ever sees recent
