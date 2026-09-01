@@ -24,7 +24,9 @@ import { agentRoutes } from '../modules/agents/agent.routes.js';
 import { createCategoryRepository } from '../modules/categories/category.repository.js';
 import { createCategoryService, type CategoryService } from '../modules/categories/category.service.js';
 import { categoryRoutes } from '../modules/categories/category.routes.js';
-import { createSessionAuthority } from '../integrations/altana/session-authority.js';
+import { createGasSponsor } from '../integrations/altana/gas-sponsor.js';
+import { createKeystoreReader } from '../integrations/altana/keystore.js';
+import { resolveNetwork } from '../integrations/altana/network.js';
 import { createHiringRepository } from '../modules/hiring/hiring.repository.js';
 import { hiringRoutes } from '../modules/hiring/hiring.routes.js';
 import { createHiringService, type HiringService } from '../modules/hiring/hiring.service.js';
@@ -125,6 +127,14 @@ export async function buildServer({
   const chainReader = createChainReader({ env, logger });
   const explorer = createExplorerClient(env, logger);
 
+  /*
+   * Which chain hiring runs on, resolved once from `ALTANA_NETWORK`. Nothing downstream
+   * hardcodes a chain id, an explorer host or a token symbol, so going live is this value plus
+   * the sponsor key rather than a code change.
+   */
+  const altanaNetwork = resolveNetwork(env.ALTANA_NETWORK);
+  const altanaKeystore = createKeystoreReader(altanaNetwork, logger);
+
   app.decorate('services', {
     agents: createAgentService(agentRepository),
     categories: createCategoryService(createCategoryRepository(db)),
@@ -142,15 +152,16 @@ export async function buildServer({
     stats: createStatsService(db),
     hiring: createHiringService({
       repository: createHiringRepository(db),
-      /*
-       * Reads `AGENT_SESSION_PRIVATE_KEY` straight from the environment rather than through
-       * the validated `Env`. Deliberate: a private key in the config object is a private key
-       * in every log line that ever dumps config, and this one is only ever needed here.
-       */
-      authority: createSessionAuthority({
-        privateKey: process.env.AGENT_SESSION_PRIVATE_KEY,
+      keystore: altanaKeystore,
+      sponsor: createGasSponsor({
+        network: altanaNetwork,
+        keystore: altanaKeystore,
+        privateKey: env.AGENT_GAS_SPONSOR_PRIVATE_KEY,
+        amountWei: env.AGENT_GAS_SPONSOR_AMOUNT_WEI,
+        maxBalanceWei: env.AGENT_GAS_SPONSOR_MAX_BALANCE_WEI,
         logger,
       }),
+      network: altanaNetwork,
       logger,
     }),
   } satisfies AppServices);

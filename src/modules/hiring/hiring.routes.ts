@@ -1,39 +1,58 @@
 import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { agentIdParamSchema } from '../agents/agent.schema.js';
 import {
-  grantSessionBodySchema,
-  grantSessionResponseSchema,
-  listSessionsResponseSchema,
-  sessionKeyParamSchema,
   agentSessionSchema,
+  listSessionsResponseSchema,
+  recordSessionBodySchema,
+  recordSessionResponseSchema,
+  sessionKeyParamSchema,
+  sponsorGasBodySchema,
+  sponsorGasResponseSchema,
 } from './hiring.schema.js';
 
 /**
- * Hiring routes: grant scoped authority to an agent, see it, take it back.
+ * Hiring routes.
  *
- * Three endpoints, and the third is not optional. A marketplace that can grant authority and
- * cannot withdraw it has shipped the dangerous half of the feature.
+ * Note what is absent: there is no endpoint that grants authority, because the backend holds
+ * no key that could. The user's passkey signs the grant in their browser and these endpoints
+ * verify and record it. `POST /sessions` is a report, not a command.
  */
 export const hiringRoutes: FastifyPluginAsyncZod = (app) => {
   const { hiring } = app.services;
 
   app.post(
+    '/agents/:id/sessions/gas',
+    {
+      schema: {
+        operationId: 'sponsorWalletGas',
+        tags: ['hiring'],
+        summary: 'Top up a wallet with enough native gas to grant a session',
+        description:
+          'Sends a small fixed amount of the native token to the caller wallet so a first-time user can hire without funding an account first. Bounded per address by current balance, so a repeat call is a no-op rather than a top-up. The sponsor key can only send native tokens: it holds no authority over any account.',
+        params: agentIdParamSchema,
+        body: sponsorGasBodySchema,
+        response: { 200: sponsorGasResponseSchema },
+      },
+    },
+    async (request) => ({ data: await hiring.sponsorGas(request.body.wallet_address) }),
+  );
+
+  app.post(
     '/agents/:id/sessions',
     {
       schema: {
-        operationId: 'hireAgent',
+        operationId: 'recordAgentSession',
         tags: ['hiring'],
-        summary: 'Grant an agent scoped, revocable authority',
+        summary: 'Record a session the user granted in their browser',
         description:
-          'Grants an Altana session key bounded by a spend ceiling, a call allowlist and an expiry, and registers it in the public Keystore so the authority is verifiable on chain rather than only in this API. The limits are enforced by the account contract, so they hold even if KATTEGAT stops running. Currently granted on a KATTEGAT-operated BSC testnet account rather than the caller wallet: see `sandbox` on the list endpoint.',
+          'Reports authority that already exists on chain. The session is verified against the public Altana Keystore before anything is stored, so a fabricated claim is rejected rather than displayed as a live spend cap. Returns 400 when the Keystore does not show the key as authorised on that wallet.',
         params: agentIdParamSchema,
-        body: grantSessionBodySchema,
-        response: { 201: grantSessionResponseSchema },
+        body: recordSessionBodySchema,
+        response: { 201: recordSessionResponseSchema },
       },
     },
     async (request, reply) => {
-      const result = await hiring.grant(request.params.id, request.body);
-      // 201: the grant created something that did not exist, on chain and here.
+      const result = await hiring.recordSession(request.params.id, request.body);
       return reply.code(201).send(result);
     },
   );
@@ -46,7 +65,7 @@ export const hiringRoutes: FastifyPluginAsyncZod = (app) => {
         tags: ['hiring'],
         summary: 'Authority granted to this agent',
         description:
-          'Every session ever granted to this agent, newest first, with a derived `status` of active, expired or revoked. Expired and revoked are kept rather than deleted: what a user granted and when they withdrew it is the record that makes the safety claim checkable.',
+          'Every session recorded for this agent, newest first. `status` is read from the Keystore rather than from our own columns, so a revocation performed anywhere (another app, or the Altana MCP server) is reflected here. `meta` carries everything chain-specific the client needs, so no UI hardcodes a network.',
         params: agentIdParamSchema,
         response: { 200: listSessionsResponseSchema },
       },
@@ -58,16 +77,16 @@ export const hiringRoutes: FastifyPluginAsyncZod = (app) => {
     '/sessions/:public_key',
     {
       schema: {
-        operationId: 'revokeAgentSession',
+        operationId: 'confirmSessionRevoked',
         tags: ['hiring'],
-        summary: 'Revoke an agent session',
+        summary: 'Confirm a revocation the user performed in their browser',
         description:
-          'Revokes on chain, then records it. One transaction, effective immediately: the session cannot act again. If the chain call fails the session stays marked active, because it still is.',
+          'Records that authority has ended. Verified first: returns 400 while the Keystore still shows the session as authorised, because marking it revoked early would switch off the revoke button while the agent could still act. The revocation itself is signed by the user passkey, never here.',
         params: sessionKeyParamSchema,
         response: { 200: agentSessionSchema },
       },
     },
-    async (request) => hiring.revoke(request.params.public_key),
+    async (request) => hiring.confirmRevoked(request.params.public_key),
   );
 
   return Promise.resolve();
