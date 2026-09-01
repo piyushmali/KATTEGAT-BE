@@ -69,21 +69,34 @@ Each step depends on the previous one's output, so they do not reorder.
 
 ### 1. Neon
 
-Create a project, region as close to the API as available. Copy the pooled
-connection string.
+Create a project. **Region must match Render's**, because the API makes several
+queries per request and a cross-region pair adds a round trip to each one. Enable
+Postgres only; object storage, functions, AI gateway and Neon Auth are all off.
+
+Copy the pooled connection string, then restore into the empty database:
 
 ```bash
 export NEON_URL='postgresql://…?sslmode=require'
 
 cd KATTEGAT-BE
-DATABASE_URL="$NEON_URL" pnpm db:migrate     # schema first, empty
-./scripts/snapshot.sh                        # ~30s, writes /tmp/kattegat-snapshot.dump
-pg_restore --no-owner --no-privileges --data-only -d "$NEON_URL" /tmp/kattegat-snapshot.dump
+./scripts/snapshot.sh                       # ~40s, writes /tmp/kattegat-snapshot.dump
+/opt/homebrew/opt/libpq/bin/pg_restore \
+  --no-owner --no-privileges -d "$NEON_URL" /tmp/kattegat-snapshot.dump
 ```
 
-`--data-only`, because `db:migrate` already created the schema and owns the
-migration history. Restoring the schema again would conflict with it and leave
-Drizzle unable to tell which migrations have run.
+**Do not run `db:migrate` first.** The dump is a full one and carries the schema,
+the data and Drizzle's own `__drizzle_migrations` rows, so the restored database
+already knows which migrations have run and `db:migrate` afterwards is a no-op.
+
+That ordering was arrived at by rehearsing it locally, and the obvious alternative
+fails. Migrating first and restoring `--data-only` aborts on foreign keys:
+`pg_restore` loads tables in its own order, so `agent_categories` and
+`agent_sessions` arrive before the `agents` rows they reference. A full restore has
+no such problem because `pg_restore` adds constraints after the data.
+
+Use the `libpq` `pg_restore`, not the one beside a local Postgres 14 server. The
+rule for crossing versions is to use tools at least as new as the target, and Neon
+is newer. `brew install libpq` provides them without a second server.
 
 Confirm before moving on:
 
@@ -96,7 +109,8 @@ psql "$NEON_URL" -c "SELECT pg_size_pretty(pg_database_size(current_database()))
 ### 2. Render
 
 New Blueprint against this repository; `render.yaml` supplies everything except
-the secrets, which it prompts for:
+the secrets, which it prompts for. Its `region` must equal the Neon region chosen
+in step 1; change both together or neither.
 
 | Variable | Value |
 | --- | --- |

@@ -32,6 +32,27 @@ SOURCE="${1:-postgres://$(whoami)@127.0.0.1:5432/kattegat}"
 OUTPUT="${2:-/tmp/kattegat-snapshot.dump}"
 SCRATCH="kattegat_snapshot_build"
 
+# Two sets of client tools, used for different hops, because the version rule cuts both ways.
+#
+# The scratch copy below is local-to-local, so it uses whatever matches the local server. The
+# final dump targets Neon, which runs a newer Postgres, and the rule for moving between versions
+# is to dump with tools at least as new as the TARGET.
+#
+# Mixing them up is not theoretical: dumping with the newer tools and restoring into the local
+# older server fails on `SET transaction_timeout = 0`, a parameter that did not exist yet.
+#
+# Homebrew's `libpq` supplies the newer psql, pg_dump and pg_restore without installing a second
+# server, and is keg-only, hence the explicit path. Absent it, both hops fall back to PATH, which
+# is correct on a machine where the versions already match.
+LIBPQ_BIN="/opt/homebrew/opt/libpq/bin"
+TARGET_PG_DUMP="pg_dump"
+if [ -x "$LIBPQ_BIN/pg_dump" ]; then
+  TARGET_PG_DUMP="$LIBPQ_BIN/pg_dump"
+fi
+
+echo "local tools   $(pg_dump --version | awk '{print $3}')"
+echo "target tools  $("$TARGET_PG_DUMP" --version | awk '{print $3}')"
+
 echo "source  $SOURCE"
 echo "output  $OUTPUT"
 
@@ -64,7 +85,8 @@ psql -q "$SCRATCH" -c "VACUUM FULL ANALYZE;"
 
 AFTER=$(psql -tAc "SELECT pg_size_pretty(pg_database_size('$SCRATCH'))" "$SCRATCH")
 
-pg_dump --no-owner --no-privileges -Fc "$SCRATCH" -f "$OUTPUT"
+# The one hop that targets a newer server, so it uses the newer tools.
+"$TARGET_PG_DUMP" --no-owner --no-privileges -Fc "$SCRATCH" -f "$OUTPUT"
 dropdb "$SCRATCH"
 
 echo
