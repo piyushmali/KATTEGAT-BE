@@ -34,24 +34,42 @@ SCRATCH="kattegat_snapshot_build"
 
 # Two sets of client tools, used for different hops, because the version rule cuts both ways.
 #
-# The scratch copy below is local-to-local, so it uses whatever matches the local server. The
-# final dump targets Neon, which runs a newer Postgres, and the rule for moving between versions
-# is to dump with tools at least as new as the TARGET.
+# The scratch copy below is local-to-local, so it needs tools matching the LOCAL server. The final
+# dump targets Neon, which runs a newer Postgres, and the rule for moving between versions is to
+# dump with tools at least as new as the TARGET.
 #
-# Mixing them up is not theoretical: dumping with the newer tools and restoring into the local
-# older server fails on `SET transaction_timeout = 0`, a parameter that did not exist yet.
+# Mixing them up is not theoretical, and it happened twice. Dumping with newer tools and restoring
+# into the older local server fails on `SET transaction_timeout = 0`, a parameter that did not
+# exist before 17.
 #
-# Homebrew's `libpq` supplies the newer psql, pg_dump and pg_restore without installing a second
-# server, and is keg-only, hence the explicit path. Absent it, both hops fall back to PATH, which
-# is correct on a machine where the versions already match.
+# Neither set is taken from PATH, which is the fix for the second occurrence: the first version of
+# this script asked PATH for the "local" tools, and a caller who happened to put libpq ahead of
+# Homebrew's postgres got the new ones for both hops and the same failure. So the local tools are
+# resolved from the server's own major version, and the target tools from libpq.
+LOCAL_MAJOR="$(psql "$SOURCE" -tAc "select current_setting('server_version_num')::int / 10000" 2>/dev/null || echo '')"
+LOCAL_BIN=""
+if [ -n "$LOCAL_MAJOR" ] && [ -x "/opt/homebrew/opt/postgresql@${LOCAL_MAJOR}/bin/pg_dump" ]; then
+  LOCAL_BIN="/opt/homebrew/opt/postgresql@${LOCAL_MAJOR}/bin"
+fi
+LOCAL_PG_DUMP="${LOCAL_BIN:+$LOCAL_BIN/}pg_dump"
+LOCAL_PG_RESTORE="${LOCAL_BIN:+$LOCAL_BIN/}pg_restore"
+
 LIBPQ_BIN="/opt/homebrew/opt/libpq/bin"
 TARGET_PG_DUMP="pg_dump"
 if [ -x "$LIBPQ_BIN/pg_dump" ]; then
   TARGET_PG_DUMP="$LIBPQ_BIN/pg_dump"
 fi
 
-echo "local tools   $(pg_dump --version | awk '{print $3}')"
+echo "local server  ${LOCAL_MAJOR:-unknown}"
+echo "local tools   $("$LOCAL_PG_DUMP" --version | awk '{print $3}')"
 echo "target tools  $("$TARGET_PG_DUMP" --version | awk '{print $3}')"
+
+# Refuse rather than produce a dump that silently lost rows to an ignored error.
+if [ -n "$LOCAL_MAJOR" ] && [ "$("$LOCAL_PG_DUMP" --version | awk '{print $3}' | cut -d. -f1)" != "$LOCAL_MAJOR" ]; then
+  echo "error: local tools are $("$LOCAL_PG_DUMP" --version | awk '{print $3}') but the source server is $LOCAL_MAJOR." >&2
+  echo "       Install postgresql@${LOCAL_MAJOR} client tools, or run against a server matching your tools." >&2
+  exit 1
+fi
 
 echo "source  $SOURCE"
 echo "output  $OUTPUT"
@@ -59,7 +77,7 @@ echo "output  $OUTPUT"
 # A throwaway copy, so the trim below never touches the source.
 dropdb --if-exists "$SCRATCH"
 createdb "$SCRATCH"
-pg_dump --no-owner --no-privileges -Fc "$SOURCE" | pg_restore --no-owner --no-privileges -d "$SCRATCH"
+"$LOCAL_PG_DUMP" --no-owner --no-privileges -Fc "$SOURCE" | "$LOCAL_PG_RESTORE" --no-owner --no-privileges -d "$SCRATCH"
 
 BEFORE=$(psql -tAc "SELECT pg_size_pretty(pg_database_size('$SCRATCH'))" "$SCRATCH")
 
