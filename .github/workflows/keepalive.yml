@@ -1,0 +1,79 @@
+name: Keep the API warm
+
+# A free Render web service spins down after 15 minutes without inbound traffic, and the next
+# request waits about a minute while it starts. That minute lands on whoever arrives first, which
+# during judging is the worst possible person to spend it on.
+#
+# So this pings /health often enough to stay under that window. It is not a workaround for a
+# broken service: the instance is healthy, it is asleep, and the platform documents both.
+#
+# WHY THIS IS WITHIN THE FREE ALLOWANCE
+#
+# Render grants 750 instance hours a month per workspace. One service running continuously is 730,
+# so staying awake fits with 20 hours to spare. The ping itself is a single GET returning a few
+# hundred bytes.
+#
+# WHY /health AND NOT /
+#
+# `/` is a 404 on this API, which would still wake the service but would also fill the logs with
+# failures and make a real problem harder to spot. /health answers 200 and additionally proves the
+# database is reachable, so a failed ping is a genuine signal rather than noise.
+#
+# COST
+#
+# Public repositories get unlimited Actions minutes. On a private repository this would consume
+# roughly 4,300 minutes a month against a 2,000 allowance, so it must stay public or move to an
+# external cron.
+
+on:
+  schedule:
+    # Every 10 minutes, comfortably inside the 15-minute idle window even when GitHub delays a
+    # scheduled run, which it does not guarantee to be punctual about.
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+# A queued ping is worthless once a later one has run, so never wait.
+concurrency:
+  group: keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Wake the API and check it is actually healthy
+        env:
+          API_URL: ${{ vars.API_URL }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${API_URL:-}" ]; then
+            echo "API_URL repository variable is not set; nothing to ping."
+            exit 0
+          fi
+
+          # --max-time 120, because a cold start is about a minute and the point of this request
+          # is to absorb that wait rather than to fail on it.
+          body=$(curl -sS --max-time 120 -w '\n%{http_code}' "$API_URL/health") || {
+            echo "ping failed to complete"
+            exit 1
+          }
+
+          code=$(printf '%s' "$body" | tail -n1)
+          payload=$(printf '%s' "$body" | sed '$d')
+
+          echo "HTTP $code"
+          echo "$payload"
+
+          # A 200 whose database is down is not healthy, and this is the only scheduled thing
+          # looking at production, so it checks the payload rather than just the status line.
+          if [ "$code" != "200" ]; then
+            echo "::error::API returned HTTP $code"
+            exit 1
+          fi
+          case "$payload" in
+            *'"database":"up"'*) echo "database up" ;;
+            *) echo "::error::API answered 200 but reports the database as unavailable"; exit 1 ;;
+          esac
