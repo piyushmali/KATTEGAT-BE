@@ -140,6 +140,25 @@ export const agents = pgTable(
     index('agents_resolved_agent_id_idx')
       .on(table.agentId.desc())
       .where(sql`${table.metadataResolvedAt} is not null`),
+    /*
+     * Search. `?q=` becomes `name ilike '%term%' or description ilike '%term%'`, and a leading
+     * wildcard is unindexable by btree, so both of these were sequential scans of every row.
+     *
+     * Trigram GIN indexes make them index lookups instead. Measured over 325,546 rows:
+     * "arbitrage" 554ms -> 1.2ms, and terms that match nothing return in 0.4ms rather than
+     * paying for a full scan to prove the absence.
+     *
+     * The cost is 44 MB for the pair, 14 on name and 30 on description, which is worth it on a
+     * 1 GB instance for the difference between a search box that responds and one that does not.
+     *
+     * Note what this does not fix. The list endpoint reports an exact total for pagination, so
+     * it also runs `count(*)` over the whole match set, and a term broad enough to match a
+     * large fraction of the table still scans: "trading" hits 129,485 of 325,546 rows, where
+     * the planner correctly prefers a sequential scan and no index would help. Selective terms,
+     * which is nearly all real searches, take the index path.
+     */
+    index('agents_name_trgm_idx').using('gin', sql`${table.name} gin_trgm_ops`),
+    index('agents_description_trgm_idx').using('gin', sql`${table.description} gin_trgm_ops`),
   ],
 );
 

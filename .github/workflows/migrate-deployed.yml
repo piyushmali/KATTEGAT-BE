@@ -1,0 +1,79 @@
+name: Migrate the deployed database
+
+# Runs Drizzle's migrator against the deployed database.
+#
+# Exists for the same reason restore-catalogue.yml does: this network drops outbound 5432, so
+# `pnpm db:migrate` cannot reach production from a laptop, and a schema change that can only be
+# applied from one machine on one network is not a deployable schema change.
+#
+# Safe to re-run. Drizzle records applied migrations in drizzle.__drizzle_migrations and skips
+# them, so a second dispatch is a no-op rather than a repeated CREATE INDEX.
+#
+# Manual dispatch only. Migrations are forward-only and are not something a schedule should
+# decide to do.
+
+on:
+  workflow_dispatch:
+    inputs:
+      analyze:
+        description: 'Run ANALYZE afterwards (needed when the migration adds an index)'
+        type: boolean
+        default: true
+
+concurrency:
+  group: migrate-deployed
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Show what is already applied
+        env:
+          DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          # psql 16 from the runner image is fine for this; it only reads.
+          psql "$DATABASE_URL" -tAc \
+            "select 'already applied: ' || count(*) from drizzle.__drizzle_migrations" \
+            || echo "no drizzle schema yet, this is a first run"
+
+      - name: Migrate
+        env:
+          DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
+        run: pnpm db:migrate
+
+      # A new index has no statistics until this runs, and the planner will ignore it in favour
+      # of the sequential scan the index was added to avoid.
+      - name: Analyze
+        if: ${{ inputs.analyze }}
+        env:
+          DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "ANALYZE;"
+
+      - name: Verify
+        env:
+          DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+          \pset border 2
+          SELECT count(*) AS migrations_applied FROM drizzle.__drizzle_migrations;
+          SELECT indexrelname AS index, pg_size_pretty(pg_relation_size(indexrelid)) AS size
+          FROM pg_stat_user_indexes WHERE relname = 'agents' ORDER BY indexrelname;
+          SELECT pg_size_pretty(pg_database_size(current_database())) AS database_size;
+          SQL

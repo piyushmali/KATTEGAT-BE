@@ -43,6 +43,13 @@
       "when": 1788254426951,
       "tag": "0005_parched_gamora",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788267854925,
+      "tag": "0006_gigantic_proteus",
+      "breakpoints": true
     }
   ]
 }
