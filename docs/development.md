@@ -49,6 +49,22 @@ pnpm sync:agents --jobs --loop          # index ERC-8183 escrow jobs (~56k, abou
 pnpm sync:agents --jobs --refresh --loop # re-read jobs that have not settled yet
 ```
 
+### Running against the deployed database
+
+```bash
+pnpm dev        # local Postgres, the default
+pnpm dev:neon   # the deployed database, read from .env.neon
+```
+
+Two commands rather than editing `DATABASE_URL`, so which database is in play is a
+choice made per invocation instead of a line someone changed and forgot. Every
+ingestion command keeps using the local value whatever the API is pointed at,
+which is the point: the deployed catalogue is a snapshot on a 512 MB free tier and
+the registry grows ~130 MB a month, so ingestion writing there is a decision with a
+deadline rather than a default. See [`deployment.md`](deployment.md).
+
+````
+
 **Which one to run.** Incremental replays logs and is bounded by the endpoint's log
 retention — roughly two hours on any free tier, so it only ever sees recent
 registrations. Backfill walks agent ids with plain `eth_call`, which has no retention
@@ -94,7 +110,7 @@ successful run, the cursor and any error.
 ```ts
 import { loadEnv } from '../config/env.js';   // correct
 import { loadEnv } from '@/config/env';       // wrong — breaks at runtime
-```
+````
 
 The build is NodeNext ESM and `tsc` does not rewrite specifiers, so a path alias
 compiles and then fails at runtime. **The frontend uses the opposite convention** —
@@ -137,7 +153,7 @@ Append a `CategoryRule` to `src/modules/classification/taxonomy.ts`. That is the
 change: the database column is plain `text`, and the Zod enums, classifier and search
 parser all derive from `AGENT_CATEGORIES` in that file. No migration.
 
-Add cases to `classifier.test.ts` — including a counter-example that must *not* match.
+Add cases to `classifier.test.ts` — including a counter-example that must _not_ match.
 
 ## Testing
 

@@ -10,6 +10,7 @@
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "dev:neon": "bash -c 'set -a; . ./.env; . ./.env.neon; DATABASE_URL=\"$NEON_POOLED\"; set +a; exec tsx watch src/index.ts'",
     "build": "tsc --project tsconfig.build.json",
     "start": "node --env-file-if-exists=.env dist/index.js",
     "typecheck": "tsc --noEmit",
