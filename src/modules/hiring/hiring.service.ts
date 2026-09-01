@@ -1,58 +1,129 @@
 import type { Logger } from 'pino';
-import { conflict, notFound } from '../../shared/errors.js';
-import type { SessionAuthority } from '../../integrations/altana/session-authority.js';
+import type { Address, Hex } from 'viem';
+import { badRequest, notFound } from '../../shared/errors.js';
+import type { GasSponsor } from '../../integrations/altana/gas-sponsor.js';
+import type { KeystoreReader } from '../../integrations/altana/keystore.js';
+import type { ResolvedNetwork } from '../../integrations/altana/network.js';
 import type { AgentSessionRow } from '../../infrastructure/database/schema.js';
 import type { HiringRepository } from './hiring.repository.js';
-import type {
-  AgentSessionResponse,
-  GrantSessionBody,
-  grantSessionResponseSchema,
-  listSessionsResponseSchema,
-} from './hiring.schema.js';
-import type { z } from 'zod';
+import type { AgentSessionResponse, RecordSessionBody } from './hiring.schema.js';
 
 /**
- * Hiring an agent: granting it bounded authority, and taking that authority back.
+ * Hiring: recording authority the user granted, and following it as it changes.
  *
- * The order of operations is the whole design. Authority is granted on chain *first*, and only
- * recorded here once the chain has accepted it. The reverse would let this table claim a hire
- * that never happened, which is the one failure this module must not have: a user reading
- * "active, 0.01 tBNB/day" about a session that does not exist has been told something false
- * about their own money.
+ * The backend does not grant and cannot revoke. The user's passkey holds admin authority on
+ * their Altana wallet, the browser performs both operations, and this service verifies the
+ * result against the public Keystore and keeps a local index so a page load does not have to
+ * decode a registry.
  *
- * Revocation runs the same way round, and it is the more important of the two. It revokes on
- * chain, then records it. If the chain call fails the row stays active, which is accurate: the
- * agent can still act, and telling the user otherwise would be the dangerous lie.
+ * WHY VERIFICATION IS THE WHOLE DESIGN
+ *
+ * A request here is a claim from a browser. Trusting it would let anyone record a fabricated
+ * session, and the marketplace would then display a spend cap, an expiry and a revoke button
+ * for authority that never existed. So nothing is written until `hasAuthority` confirms the
+ * Keystore agrees, and `status` is read from the chain on every list rather than from our own
+ * `revoked_at`.
+ *
+ * That last part matters more than it looks. A user can revoke through another app, or through
+ * the Altana MCP server in Claude, and never touch KATTEGAT. Deriving status from our column
+ * would show that session as live indefinitely.
  */
 
 export interface HiringService {
-  grant(agentId: string, body: GrantSessionBody): Promise<z.infer<typeof grantSessionResponseSchema>>;
-  listForAgent(agentId: string): Promise<z.infer<typeof listSessionsResponseSchema>>;
-  revoke(publicKey: string): Promise<AgentSessionResponse>;
+  recordSession(agentId: string, body: RecordSessionBody): Promise<HiringResult>;
+  listForAgent(agentId: string): Promise<HiringList>;
+  /** Confirms a revocation the browser performed. Never performs one. */
+  confirmRevoked(publicKey: string): Promise<AgentSessionResponse>;
+  sponsorGas(walletAddress: string): Promise<{
+    transaction_hash: string | null;
+    amount_wei: string | null;
+    sponsor_address: string | null;
+    sponsored: boolean;
+  }>;
+}
+
+interface HiringContext {
+  enabled: boolean;
+  chain_id: number;
+  network: string;
+  is_mainnet: boolean;
+  native_symbol: string;
+  explorer_url: string;
+  keystore_address: string;
+  gas_sponsored: boolean;
+}
+
+interface HiringResult {
+  data: AgentSessionResponse;
+  meta: HiringContext;
+}
+
+interface HiringList {
+  data: AgentSessionResponse[];
+  meta: HiringContext;
 }
 
 export interface HiringServiceDeps {
   repository: HiringRepository;
-  authority: SessionAuthority;
+  keystore: KeystoreReader;
+  sponsor: GasSponsor;
+  network: ResolvedNetwork;
   logger: Logger;
 }
 
 const iso = (value: Date): string => value.toISOString();
 
-/**
- * Authority ends two different ways and the UI has to tell them apart.
- *
- * Revoked means someone took it back; expired means nobody had to. Both mean the agent cannot
- * act, so collapsing them into one flag would be tempting and would lose the more interesting
- * half: an expired session is a session that ran its course, a revoked one is a decision.
- */
-function toStatus(row: AgentSessionRow): AgentSessionResponse['status'] {
-  if (row.revokedAt !== null) return 'revoked';
-  return row.expiresAt.getTime() <= Date.now() ? 'expired' : 'active';
-}
+export function createHiringService({
+  repository,
+  keystore,
+  sponsor,
+  network,
+  logger,
+}: HiringServiceDeps): HiringService {
+  const context = (): HiringContext => ({
+    enabled: true,
+    chain_id: network.config.chainId,
+    network: network.name,
+    is_mainnet: network.isMainnet,
+    native_symbol: network.nativeSymbol,
+    explorer_url: network.config.explorer,
+    keystore_address: network.config.keyStore,
+    gas_sponsored: sponsor.enabled,
+  });
 
-function toWire(row: AgentSessionRow): AgentSessionResponse {
-  return {
+  /**
+   * Status from the registry, with our columns as the fallback.
+   *
+   * Expiry is checked first because it needs no network call and is the common way authority
+   * ends. Beyond that the Keystore decides, so a revocation performed anywhere is reflected
+   * here.
+   */
+  const statusOf = async (row: AgentSessionRow): Promise<AgentSessionResponse['status']> => {
+    if (row.revokedAt !== null) return 'revoked';
+    if (row.expiresAt.getTime() <= Date.now()) return 'expired';
+
+    const live = await keystore.hasAuthority({
+      walletAddress: row.walletAddress as Address,
+      publicKey: row.publicKey as Hex,
+    });
+
+    /*
+     * Recorded when the chain disagrees with us, so the next read is cheap and the local index
+     * converges on the truth instead of asking again forever.
+     */
+    if (!live) {
+      await repository.markRevoked(row.publicKey, null);
+      logger.info(
+        { publicKey: row.publicKey },
+        'session no longer authorised on chain; recorded as revoked',
+      );
+      return 'revoked';
+    }
+
+    return 'active';
+  };
+
+  const toWire = async (row: AgentSessionRow): Promise<AgentSessionResponse> => ({
     public_key: row.publicKey,
     agent_id: row.agentId,
     wallet_address: row.walletAddress,
@@ -65,55 +136,49 @@ function toWire(row: AgentSessionRow): AgentSessionResponse {
     revoked_at: row.revokedAt === null ? null : iso(row.revokedAt),
     revoked_tx_hash: row.revokedTxHash,
     chain_id: row.chainId,
-    status: toStatus(row),
-  };
-}
+    status: await statusOf(row),
+  });
 
-export function createHiringService({
-  repository,
-  authority,
-  logger,
-}: HiringServiceDeps): HiringService {
   return {
-    async grant(agentId, body) {
+    async recordSession(agentId, body) {
       if (!(await repository.agentExists(agentId))) {
         throw notFound(`No agent with id "${agentId}" has been indexed.`);
       }
 
-      const expiryUnix = Math.floor(Date.now() / 1000) + body.duration_minutes * 60;
+      const expiresAt = new Date(body.expires_at_unix * 1000);
+      if (expiresAt.getTime() <= Date.now()) {
+        throw badRequest('That session has already expired, so there is nothing to record.');
+      }
 
       /*
-       * Chain first. Nothing is written here until the account contract has accepted the
-       * grant, so this table cannot describe authority that does not exist.
+       * The gate. Everything above this line is shape validation; this is the only check that
+       * establishes the session is real.
        */
-      const granted = await authority.grant({
-        spendLimitWei: BigInt(body.spend_limit_wei),
-        spendPeriod: body.spend_period,
-        expiryUnix,
-        allowedTargets: body.allowed_targets as `0x${string}`[],
+      const authorised = await keystore.hasAuthority({
+        walletAddress: body.wallet_address as Address,
+        publicKey: body.public_key as Hex,
       });
 
+      if (!authorised) {
+        throw badRequest(
+          'The Keystore does not show this session key as authorised on that wallet. Nothing was recorded.',
+        );
+      }
+
       const row = await repository.record({
-        publicKey: granted.publicKey,
+        publicKey: body.public_key,
         agentId,
-        walletAddress: granted.walletAddress,
+        walletAddress: body.wallet_address,
         spendLimitWei: body.spend_limit_wei,
         spendPeriod: body.spend_period,
         allowedCalls: body.allowed_targets,
-        expiresAt: new Date(granted.expiryUnix * 1000),
-        grantedTxHash: granted.transactionHash,
-        chainId: granted.chainId,
+        expiresAt,
+        grantedTxHash: body.granted_tx_hash ?? null,
+        chainId: network.config.chainId,
       });
 
-      logger.info({ agentId, publicKey: granted.publicKey }, 'agent hired');
-
-      return {
-        data: toWire(row),
-        meta: {
-          keystore_registered: granted.keystoreRegistered,
-          explorer_url: authority.explorerUrl,
-        },
-      };
+      logger.info({ agentId, publicKey: row.publicKey }, 'agent hired');
+      return { data: await toWire(row), meta: context() };
     },
 
     async listForAgent(agentId) {
@@ -122,50 +187,58 @@ export function createHiringService({
       }
 
       const rows = await repository.listForAgent(agentId);
-
       return {
-        data: rows.map(toWire),
-        meta: {
-          enabled: authority.enabled,
-          chain_id: authority.chainId,
-          explorer_url: authority.explorerUrl,
-          /*
-           * Always true while the admin signer is a KATTEGAT key rather than the visitor's
-           * wallet. Returned rather than left to the client to know, so the disclosure cannot
-           * drift out of sync with what the backend is actually doing.
-           */
-          sandbox: authority.enabled,
-        },
+        data: await Promise.all(rows.map(toWire)),
+        meta: context(),
       };
     },
 
-    async revoke(publicKey) {
+    async confirmRevoked(publicKey) {
       const existing = await repository.findByPublicKey(publicKey);
       if (existing === null) {
         throw notFound('No granted session with that key is on record.');
       }
-      if (existing.revokedAt !== null) {
-        // Idempotent on chain, but worth saying: a second revoke is a no-op, not a failure,
-        // and reporting success would imply this call did something.
-        throw conflict('That session has already been revoked.');
-      }
 
       /*
-       * Chain first, again, and here it matters more. If this throws, the row stays active,
-       * which is the truth: the agent can still act. Marking it revoked on a failed call would
-       * tell the user they are safe when they are not.
+       * Verified, not taken on trust. A client claiming a revocation it did not perform would
+       * otherwise turn off the revoke button while the agent still had authority, which is the
+       * most dangerous thing this endpoint could do.
        */
-      const { transactionHash } = await authority.revoke(publicKey as `0x${string}`);
+      const stillAuthorised = await keystore.hasAuthority({
+        walletAddress: existing.walletAddress as Address,
+        publicKey: existing.publicKey as Hex,
+      });
 
-      const row = await repository.markRevoked(publicKey, transactionHash);
-      if (row === null) {
-        // Lost a race with another revoke. The chain state is what we wanted either way.
-        const latest = await repository.findByPublicKey(publicKey);
-        if (latest === null) throw notFound('No granted session with that key is on record.');
-        return toWire(latest);
+      if (stillAuthorised) {
+        throw badRequest(
+          'The Keystore still shows this session as authorised. The revocation may not have confirmed yet.',
+        );
       }
 
+      const row = (await repository.markRevoked(publicKey, null)) ?? existing;
+      logger.info({ publicKey }, 'revocation confirmed on chain');
       return toWire(row);
+    },
+
+    async sponsorGas(walletAddress) {
+      if (!sponsor.enabled) {
+        return {
+          transaction_hash: null,
+          amount_wei: null,
+          sponsor_address: null,
+          sponsored: false,
+        };
+      }
+
+      const result = await sponsor.fund(walletAddress as Address);
+
+      return {
+        transaction_hash: result?.transactionHash ?? null,
+        amount_wei: result?.amountWei ?? null,
+        sponsor_address: sponsor.address,
+        // True when sponsorship is available, whether or not this call needed to send anything.
+        sponsored: true,
+      };
     },
   };
 }

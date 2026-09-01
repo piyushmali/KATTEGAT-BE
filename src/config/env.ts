@@ -76,6 +76,66 @@ const envSchema = z
     AI_BASE_URL: z.string().default(''),
     AI_API_KEY: z.string().default(''),
     AI_MODEL: z.string().default(''),
+
+    /* ----------------------------- agent hiring ---------------------------- */
+
+    /**
+     * Which Altana network hiring runs on.
+     *
+     * The whole point of this being configuration: going live is a change to this value and
+     * to the sponsor key, not a change to code. Nothing downstream hardcodes a chain id, an
+     * explorer host or a token symbol; they all derive from the resolved network and are
+     * carried to the browser through the API.
+     *
+     * Defaults to testnet, because the failure mode of the wrong default matters: testnet on
+     * mainnet infrastructure is a broken demo, mainnet on a testnet deployment moves real
+     * money.
+     */
+    ALTANA_NETWORK: z.enum(['bnb-testnet', 'bnb']).default('bnb-testnet'),
+
+    /**
+     * Private key whose only job is topping up a user's wallet with native gas.
+     *
+     * A faucet, not an authority. It cannot grant a session, cannot revoke one and cannot
+     * move anything from a user's account, because authority on an Altana wallet belongs to
+     * the passkey in the user's device and this key is not it.
+     *
+     * The predecessor to this field was the admin signer for every session the marketplace
+     * granted, which made the product custodial while its own copy promised the opposite.
+     * The name changed with the semantics so nothing reintroduces the old behaviour by
+     * reading a familiar variable.
+     *
+     * Empty disables sponsorship; hiring still works, the user funds their own gas.
+     */
+    AGENT_GAS_SPONSOR_PRIVATE_KEY: z
+      .string()
+      .regex(/^(0x[0-9a-fA-F]{64})?$/, 'expected a 0x-prefixed 32-byte private key, or empty')
+      .default(''),
+
+    /**
+     * Native amount sent to a new user wallet, in wei.
+     *
+     * Measured: a full grant, act and revoke lifecycle costs 962,143 gas, which at BSC's
+     * 0.05 gwei is 0.0000481 BNB, about three US cents. The default is roughly twenty times
+     * that, so a user can hire, act and revoke several times over without returning to us,
+     * and a compromised sponsor key still leaks almost nothing per request.
+     */
+    AGENT_GAS_SPONSOR_AMOUNT_WEI: z
+      .string()
+      .regex(/^\d{1,30}$/)
+      .default('1000000000000000'),
+
+    /**
+     * Per-address sponsorship ceiling in wei.
+     *
+     * Without this the sponsor endpoint is a drain: anyone can call it in a loop and empty
+     * the key. Enforced against the address's current balance, so a wallet that already has
+     * gas is refused rather than topped up again.
+     */
+    AGENT_GAS_SPONSOR_MAX_BALANCE_WEI: z
+      .string()
+      .regex(/^\d{1,30}$/)
+      .default('5000000000000000'),
   })
   .superRefine((env, ctx) => {
     // An "enabled" AI provider with no credentials is a silent 500 later, so
@@ -85,6 +145,19 @@ const envSchema = z
         code: 'custom',
         path: ['AI_API_KEY'],
         message: 'required when AI_PROVIDER is "openai-compatible"',
+      });
+    }
+    /*
+     * Guards the one configuration mistake here that costs real money: running the mainnet
+     * Altana network by accident. Going live has to be deliberate, so it requires
+     * NODE_ENV=production as well, which a local or staging deployment will not have set.
+     */
+    if (env.ALTANA_NETWORK === 'bnb' && env.NODE_ENV !== 'production') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['ALTANA_NETWORK'],
+        message:
+          'mainnet hiring requires NODE_ENV=production. Real funds move on this network, so enabling it outside production is refused.',
       });
     }
     if (env.NODE_ENV === 'production' && env.CORS_ORIGINS.includes('*')) {
