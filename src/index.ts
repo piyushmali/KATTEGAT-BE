@@ -38,6 +38,28 @@ async function main(): Promise<void> {
     { url: `http://${env.HOST}:${String(env.PORT)}`, docs: '/docs' },
     'KATTEGAT API listening',
   );
+
+  /*
+   * Warm the landing page's stats aggregate.
+   *
+   * It costs 8.3s on a cold cache, because one of its nine counts has to scan the 290 MB agents
+   * heap on a 256 MB instance. Once warm, the service serves stale readings while refreshing, so
+   * nobody waits again. The gap that leaves is the first visitor after a restart, and this closes
+   * it by making that first caller the process itself.
+   *
+   * Deliberately after `listen` and deliberately not awaited. The host polls for an open port and
+   * kills a service that is slow to provide one, so warming must never sit between the process
+   * starting and the port opening.
+   */
+  void app.services.stats
+    .ecosystem()
+    .then(() => {
+      logger.info('stats cache warmed');
+    })
+    .catch((error: unknown) => {
+      // Not fatal: the first request will simply pay for the read, as it did before.
+      logger.warn({ err: error }, 'stats cache warm failed');
+    });
 }
 
 main().catch((error: unknown) => {
