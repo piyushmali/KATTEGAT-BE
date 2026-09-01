@@ -24,7 +24,8 @@
     "sync:agents": "tsx --env-file-if-exists=.env src/modules/ingestion/sync.cli.ts",
     "reclassify": "tsx --env-file-if-exists=.env src/modules/classification/reclassify.cli.ts",
     "verify:chain": "tsx --env-file-if-exists=.env scripts/verify-chain.ts",
-    "altana:smoke": "tsx --env-file-if-exists=.env scripts/altana-smoke.ts"
+    "altana:smoke": "tsx --env-file-if-exists=.env scripts/altana-smoke.ts",
+    "erc8183:smoke": "tsx --env-file-if-exists=.env scripts/erc8183-smoke.ts"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
