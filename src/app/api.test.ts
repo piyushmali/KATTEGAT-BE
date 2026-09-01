@@ -323,6 +323,37 @@ describe('GET /api/v1/agents', () => {
     expect(body.meta.total).toBeGreaterThanOrEqual(2);
   });
 
+  /**
+   * Pins `meta.total` to an exact number, which the envelope test above cannot do because it
+   * counts the whole table alongside 325,546 real rows.
+   *
+   * Guards the count query specifically. It does not join `agent_reputation`, deliberately, so
+   * that the planner can answer the discovery grid's default filter from a partial index instead
+   * of sequentially scanning every row — a 47x difference in I/O and several seconds through the
+   * API. That join was safe to drop only because the relationship is one-to-one and no filter
+   * references the table, and both of those are assumptions about the schema rather than about
+   * this function.
+   *
+   * So this asserts the arithmetic the optimisation depends on. If a second reputation row per
+   * agent ever becomes possible, or a filter starts referencing that table, the count breaks
+   * here rather than quietly reporting inflated totals in production.
+   */
+  it('counts each matching agent exactly once', async () => {
+    guard();
+    const response = await app.inject({
+      method: 'GET',
+      // per_page=1 so the page and the count disagree unless the count is computed independently.
+      url: `/api/v1/agents?trait=${FIXTURE_TRAIT}&per_page=1`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{ data: unknown[]; meta: { total: number } }>();
+
+    // Four fixtures carry the trait, each with exactly one reputation row.
+    expect(body.meta.total).toBe(4);
+    expect(body.data.length).toBe(1);
+  });
+
   it('filters by derived category', async () => {
     guard();
     const response = await app.inject({

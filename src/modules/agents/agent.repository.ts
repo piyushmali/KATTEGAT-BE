@@ -347,11 +347,25 @@ export function createAgentRepository(db: Database): AgentRepository {
         .limit(options.perPage)
         .offset(offset);
 
-      const [totalRow] = await db
-        .select({ value: count() })
-        .from(agents)
-        .leftJoin(agentReputation, eq(agentReputation.agentId, agents.id))
-        .where(where);
+      /*
+       * No reputation join here, unlike the page query above.
+       *
+       * That join belongs in the query that selects reputation and can sort by it. In the
+       * count it cannot affect the answer — `agent_reputation` holds exactly one row per
+       * agent under its primary key, and a left join keeps every left row regardless — and
+       * `buildWhere` never references the table, only `agents` columns and an EXISTS against
+       * `agent_categories`.
+       *
+       * What it did do was defeat the index. Joining put the planner on a parallel sequential
+       * scan of all 325,546 rows instead of a parallel index-only scan of the partial index
+       * built for this exact predicate, turning 670 buffer reads into 31,734: a 47x increase
+       * in I/O for a table that does not fit in the deployed instance's 256 MB of RAM.
+       *
+       * Measured through the API on the discovery grid's default request, which is the first
+       * thing most visitors load: 5.2s with the join, and it is the whole reason that page
+       * showed skeletons for several seconds.
+       */
+      const [totalRow] = await db.select({ value: count() }).from(agents).where(where);
 
       if (rows.length === 0) {
         return { agents: [], total: totalRow?.value ?? 0 };
