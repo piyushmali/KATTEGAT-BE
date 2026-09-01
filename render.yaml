@@ -1,0 +1,69 @@
+# Render blueprint for the KATTEGAT API.
+#
+# Committed so the deployment is reviewable and reproducible rather than a set of choices
+# someone made in a web form once. Render reads this on "New Blueprint" and creates the service
+# with these settings.
+#
+# WHY FREE, AND WHAT THAT COSTS
+#
+# A free web service spins down after 15 minutes without inbound traffic, and the next request
+# waits about a minute for it to start. That is survivable for a demo but bad for a judge's first
+# impression, so the ingestion workflow pings /health on a schedule to keep it warm. 750 instance
+# hours a month covers one service running continuously (730), so staying warm is within budget.
+#
+# The database is deliberately NOT declared here. Render's free Postgres is deleted after 30 days,
+# which would take the catalogue with it partway through a judging window. Neon's free tier has no
+# such expiry, so the database lives there and DATABASE_URL points at it. See docs/deployment.md.
+
+services:
+  - type: web
+    name: kattegat-api
+    runtime: node
+    plan: free
+    # Singapore is the closest free region to both the operator and BSC's RPC endpoints.
+    region: singapore
+
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    startCommand: pnpm start
+
+    # Render restarts the service when this stops answering, and uses it to decide a deploy
+    # succeeded. /health reports database reachability, so a service that cannot reach Neon fails
+    # the deploy rather than serving errors.
+    healthCheckPath: /health
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Render routes to the container's published port, so binding to loopback would make the
+      # service unreachable and the health check would fail with no obvious cause. The default in
+      # config/env.ts is 127.0.0.1, which is right for local and wrong here.
+      - key: HOST
+        value: 0.0.0.0
+      - key: NODE_VERSION
+        value: '24'
+      - key: LOG_LEVEL
+        value: info
+
+      # Set in the dashboard, not here. `sync: false` tells Render to prompt rather than to
+      # expect a value in this file, which keeps connection strings and keys out of git.
+      - key: DATABASE_URL
+        sync: false
+      # Comma-separated. Must include the Vercel origin, or every browser request is blocked by
+      # CORS while curl keeps working, which is a confusing way to find out.
+      - key: CORS_ORIGINS
+        sync: false
+      - key: BSC_RPC_URL
+        sync: false
+      - key: BSC_RPC_URL_FALLBACK
+        sync: false
+
+      # Which chain hiring runs on. `bnb-testnet` until real funds are intended; config/env.ts
+      # refuses mainnet unless NODE_ENV is production, so this is the one value that decides
+      # whether a mistake costs money.
+      - key: ALTANA_NETWORK
+        value: bnb-testnet
+
+      # Optional. Without it the gas sponsor is simply disabled and users fund their own gas,
+      # which the hiring panel already reports honestly.
+      - key: AGENT_GAS_SPONSOR_PRIVATE_KEY
+        sync: false
