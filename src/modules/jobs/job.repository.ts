@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, lt, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import type { Database } from '../../infrastructure/database/client.js';
 import { agentJobs, type AgentJobRow } from '../../infrastructure/database/schema.js';
 import {
@@ -56,8 +56,50 @@ export interface JobRepository {
   /** How many non-terminal jobs are left beyond this cursor. */
   countPendingAfter(chainId: number, afterJobId: number): Promise<number>;
   summaryForAgent(agentId: string): Promise<JobSummary>;
+  /**
+   * Summaries for a page of agents in one query.
+   *
+   * Agents with no jobs are absent from the map rather than present with zeroes, so a caller
+   * can tell "never hired" from "hired and delivered nothing". Those are different claims and
+   * the UI says different things about them.
+   */
+  summariesForAgents(agentIds: readonly string[]): Promise<Map<string, JobSummary>>;
   listForAgent(agentId: string, limit: number): Promise<AgentJobRow[]>;
 }
+
+/**
+ * Normalises whatever the driver hands back for `max(timestamptz)`.
+ *
+ * Needed because `sql<Date | null>` is an assertion, not a conversion. Drizzle applies a
+ * column's type mapper to selected columns but not to an aggregate written as raw SQL, so this
+ * arrives as a string and the declared type quietly disagrees with the value. It reached a
+ * response as `summary.lastJobAt?.toISOString is not a function`.
+ *
+ * Converted here rather than by widening the domain type to `Date | string`, which would push
+ * the same ambiguity onto every caller.
+ */
+const toDate = (value: Date | string | null): Date | null => {
+  if (value === null) return null;
+  return value instanceof Date ? value : new Date(value);
+};
+
+/** The aggregate columns, shared by the single and batch summary queries. */
+const summaryColumns = {
+  total: sql<number>`count(*)::int`,
+  /* Anything past OPEN was funded: the kernel has no route back from FUNDED to OPEN. */
+  funded: sql<number>`count(*) FILTER (WHERE ${agentJobs.status} > ${JOB_STATUS_INDEX.open})::int`,
+  completed: sql<number>`count(*) FILTER (WHERE ${agentJobs.status} = ${JOB_STATUS_INDEX.completed})::int`,
+  awaitingRelease: sql<number>`count(*) FILTER (WHERE ${agentJobs.status} = ${JOB_STATUS_INDEX.submitted})::int`,
+  /*
+   * Summed in Postgres over `numeric`, not in JS. $U carries 18 decimals, so these totals
+   * routinely exceed what a double holds exactly, and a settled figure that is off in its low
+   * digits is worse than no figure at all.
+   */
+  settledRaw: sql<string>`coalesce(sum(${agentJobs.budgetRaw}) FILTER (WHERE ${agentJobs.status} = ${JOB_STATUS_INDEX.completed}), 0)::text`,
+  /* Funded jobs only. An OPEN job's budget was set, not escrowed. */
+  escrowedRaw: sql<string>`coalesce(sum(${agentJobs.budgetRaw}) FILTER (WHERE ${agentJobs.status} > ${JOB_STATUS_INDEX.open}), 0)::text`,
+  lastJobAt: sql<Date | string | null>`max(${agentJobs.expiredAt})`,
+};
 
 export function createJobRepository(db: Database): JobRepository {
   return {
@@ -184,22 +226,7 @@ export function createJobRepository(db: Database): JobRepository {
 
     async summaryForAgent(agentId) {
       const [row] = await db
-        .select({
-          total: sql<number>`count(*)::int`,
-          /* Anything past OPEN was funded: the kernel has no route back from FUNDED to OPEN. */
-          funded: sql<number>`count(*) FILTER (WHERE ${agentJobs.status} > ${JOB_STATUS_INDEX.open})::int`,
-          completed: sql<number>`count(*) FILTER (WHERE ${agentJobs.status} = ${JOB_STATUS_INDEX.completed})::int`,
-          awaitingRelease: sql<number>`count(*) FILTER (WHERE ${agentJobs.status} = ${JOB_STATUS_INDEX.submitted})::int`,
-          /*
-           * Summed in Postgres over `numeric`, not in JS. $U carries 18 decimals, so these
-           * totals routinely exceed what a double holds exactly, and a settled figure that is
-           * off in its low digits is worse than no figure at all.
-           */
-          settledRaw: sql<string>`coalesce(sum(${agentJobs.budgetRaw}) FILTER (WHERE ${agentJobs.status} = ${JOB_STATUS_INDEX.completed}), 0)::text`,
-          /* Funded jobs only. An OPEN job's budget was set, not escrowed. */
-          escrowedRaw: sql<string>`coalesce(sum(${agentJobs.budgetRaw}) FILTER (WHERE ${agentJobs.status} > ${JOB_STATUS_INDEX.open}), 0)::text`,
-          lastJobAt: sql<Date | null>`max(${agentJobs.expiredAt})`,
-        })
+        .select(summaryColumns)
         .from(agentJobs)
         .where(eq(agentJobs.agentId, agentId));
 
@@ -210,8 +237,36 @@ export function createJobRepository(db: Database): JobRepository {
         awaitingRelease: row?.awaitingRelease ?? 0,
         settledRaw: row?.settledRaw ?? '0',
         escrowedRaw: row?.escrowedRaw ?? '0',
-        lastJobAt: row?.lastJobAt ?? null,
+        lastJobAt: toDate(row?.lastJobAt ?? null),
       };
+    },
+
+    async summariesForAgents(agentIds) {
+      const out = new Map<string, JobSummary>();
+      if (agentIds.length === 0) return out;
+
+      const rows = await db
+        .select({ agentId: agentJobs.agentId, ...summaryColumns })
+        .from(agentJobs)
+        .where(inArray(agentJobs.agentId, [...agentIds]))
+        .groupBy(agentJobs.agentId);
+
+      for (const row of rows) {
+        /* Narrowing only: rows are grouped by a column the `inArray` already made non-null. */
+        if (row.agentId === null) continue;
+
+        out.set(row.agentId, {
+          total: row.total,
+          funded: row.funded,
+          completed: row.completed,
+          awaitingRelease: row.awaitingRelease,
+          settledRaw: row.settledRaw,
+          escrowedRaw: row.escrowedRaw,
+          lastJobAt: toDate(row.lastJobAt),
+        });
+      }
+
+      return out;
     },
 
     async listForAgent(agentId, limit) {

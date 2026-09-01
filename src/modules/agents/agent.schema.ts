@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { PROTOCOL_TAGS } from '../../integrations/erc8004/registration-file.js';
 import { AGENT_CATEGORIES } from '../classification/taxonomy.js';
 import { paginationSchema } from '../../shared/http/api.schema.js';
+import { agentJobsSchema } from '../jobs/job.schema.js';
 import { ENDPOINT_KINDS } from './agent.types.js';
 
 /**
@@ -172,6 +173,19 @@ export const agentSummarySchema = z.object({
   profile: agentProfileSchema,
   categories: z.array(agentCategoryAssignmentSchema),
   reputation: agentReputationSchema.nullable(),
+  /**
+   * ERC-8183 escrow this agent was hired through, when there is any.
+   *
+   * Null means no job on the kernel names this agent, which is the ordinary case: 53 of the
+   * indexed agents have one. Null rather than a zeroed object on purpose, so a client can tell
+   * "never commissioned" apart from "commissioned and delivered nothing" — those are different
+   * things to say about an agent, and a row of zeroes reads like the second.
+   *
+   * Attribution is by the agent's own wallet address and only when that address belongs to
+   * exactly one indexed agent, so this is absent for agents sharing an address rather than
+   * guessed at. See modules/jobs/job.repository.ts.
+   */
+  jobs: agentJobsSchema.nullable(),
 });
 
 export const listAgentsResponseSchema = z.object({

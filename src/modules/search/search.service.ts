@@ -2,7 +2,8 @@ import { z } from 'zod';
 import type { Logger } from 'pino';
 import { toPagination } from '../../shared/http/api.schema.js';
 import type { AiProvider } from '../../integrations/ai/provider.js';
-import { toWireAgent } from '../agents/agent.mapper.js';
+import { toWireAgentPage } from '../agents/agent.mapper.js';
+import type { JobRepository } from '../jobs/job.repository.js';
 import type { AgentRepository } from '../agents/agent.repository.js';
 import { AGENT_CATEGORIES, type AgentCategory } from '../classification/taxonomy.js';
 import { parseSearchIntent, type SearchIntent } from './search.intent.js';
@@ -28,6 +29,13 @@ export interface SearchService {
 
 export interface SearchServiceDeps {
   repository: AgentRepository;
+  /**
+   * Escrow history for the results.
+   *
+   * Search carries it for the same reason browse does. An agent whose delivered work shows when
+   * browsed and vanishes when searched would look like the evidence was invented.
+   */
+  jobs: Pick<JobRepository, 'summariesForAgents'>;
   /** Null when AI_PROVIDER=none, which is the default. */
   ai: AiProvider | null;
   logger: Logger;
@@ -46,7 +54,12 @@ const AI_SYSTEM_PROMPT = [
   'Answer "none" unless the query clearly indicates one category. Do not guess.',
 ].join(' ');
 
-export function createSearchService({ repository, ai, logger }: SearchServiceDeps): SearchService {
+export function createSearchService({
+  repository,
+  jobs,
+  ai,
+  logger,
+}: SearchServiceDeps): SearchService {
   /** Returns a category the model is confident about, or null. */
   async function assistWithAi(query: string): Promise<{ category: AgentCategory; reason: string } | null> {
     if (!ai) return null;
@@ -143,7 +156,7 @@ export function createSearchService({ repository, ai, logger }: SearchServiceDep
       }
 
       return {
-        data: result.agents.map(toWireAgent),
+        data: await toWireAgentPage(result.agents, jobs),
         meta: {
           ...toPagination(result.total, query.page, query.per_page),
           interpretation: {

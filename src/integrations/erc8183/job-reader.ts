@@ -55,6 +55,18 @@ export const JOB_STATUS_INDEX = {
 export const FIRST_TERMINAL_STATUS = JOB_STATUS_INDEX.completed;
 
 /**
+ * The token the kernel escrows: United Stables, $U.
+ *
+ * Fixed per deployment rather than per job — `ERC8183_ADDRESSES` names one `paymentToken` for
+ * each chain — so these are constants rather than a read on the request path. Both values were
+ * read off the live contracts, mainnet and testnet, and agree.
+ *
+ * Sent to clients rather than assumed by them, so no UI hardcodes a symbol or divides by the
+ * wrong power of ten.
+ */
+export const PAYMENT_TOKEN = { symbol: 'U', decimals: 18 } as const;
+
+/**
  * Jobs per `getJob` multicall.
  *
  * Lower than the registry's chunk sizes on purpose. A job carries its description inline, up
@@ -99,6 +111,8 @@ export interface JobRead {
 export interface Erc8183JobReader {
   chainId: number;
   addresses: Erc8183Addresses;
+  /** Explorer base for this chain, so callers never hardcode a host. */
+  explorerUrl: string;
   /** Highest minted job id, which for a 1-indexed counter is also the count. */
   jobCounter(): Promise<number>;
   /** Seconds between submission and when the escrow may be released. */
@@ -167,6 +181,7 @@ export function createErc8183JobReader({
   return {
     chainId,
     addresses,
+    explorerUrl: REGISTRY_CHAIN.blockExplorers.default.url,
 
     async jobCounter() {
       try {

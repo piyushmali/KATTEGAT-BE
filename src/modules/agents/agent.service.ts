@@ -1,6 +1,7 @@
 import { notFound } from '../../shared/errors.js';
 import { toPagination } from '../../shared/http/api.schema.js';
-import { toWireAgent } from './agent.mapper.js';
+import type { JobRepository } from '../jobs/job.repository.js';
+import { toWireAgent, toWireAgentPage } from './agent.mapper.js';
 import type { AgentRepository, ListAgentsFilters } from './agent.repository.js';
 import type {
   AgentFilterQuery,
@@ -41,7 +42,10 @@ export function toRepositoryFilters(query: AgentFilterQuery): ListAgentsFilters 
   return filters;
 }
 
-export function createAgentService(repository: AgentRepository): AgentService {
+export function createAgentService(
+  repository: AgentRepository,
+  jobs: Pick<JobRepository, 'summariesForAgents' | 'summaryForAgent'>,
+): AgentService {
   return {
     async list(query: ListAgentsQuery): Promise<ListAgentsResponse> {
       const result = await repository.list({
@@ -53,7 +57,7 @@ export function createAgentService(repository: AgentRepository): AgentService {
       });
 
       return {
-        data: result.agents.map(toWireAgent),
+        data: await toWireAgentPage(result.agents, jobs),
         meta: toPagination(result.total, query.page, query.per_page),
       };
     },
@@ -63,7 +67,15 @@ export function createAgentService(repository: AgentRepository): AgentService {
       if (!agent) {
         throw notFound(`No agent with id "${id}" has been indexed.`);
       }
-      return { data: toWireAgent(agent) };
+
+      const summary = await jobs.summaryForAgent(id);
+
+      /*
+       * Absent rather than zeroed when no job names this agent. A row of zeroes would read as
+       * "hired and delivered nothing", which is a different and much worse claim than "not yet
+       * hired through the escrow rail".
+       */
+      return { data: toWireAgent(agent, summary.total === 0 ? null : summary) };
     },
   };
 }

@@ -30,6 +30,10 @@ import { resolveNetwork } from '../integrations/altana/network.js';
 import { createHiringRepository } from '../modules/hiring/hiring.repository.js';
 import { hiringRoutes } from '../modules/hiring/hiring.routes.js';
 import { createHiringService, type HiringService } from '../modules/hiring/hiring.service.js';
+import { createErc8183JobReader } from '../integrations/erc8183/job-reader.js';
+import { createJobRepository } from '../modules/jobs/job.repository.js';
+import { jobRoutes } from '../modules/jobs/job.routes.js';
+import { createJobService, type JobService } from '../modules/jobs/job.service.js';
 import { createReputationRepository } from '../modules/reputation/reputation.repository.js';
 import {
   createReputationService,
@@ -51,6 +55,7 @@ export interface AppServices {
   agents: AgentService;
   categories: CategoryService;
   hiring: HiringService;
+  jobs: JobService;
   reputation: ReputationService;
   search: SearchService;
   stats: StatsService;
@@ -135,9 +140,25 @@ export async function buildServer({
   const altanaNetwork = resolveNetwork(env.ALTANA_NETWORK);
   const altanaKeystore = createKeystoreReader(altanaNetwork, logger);
 
+  /*
+   * ERC-8183 escrow, read from the same chain as the registry rather than from `ALTANA_NETWORK`.
+   *
+   * Deliberately not the session network. Jobs are linked to agents by provider address, and an
+   * address only means one thing within one chain, so reading escrow from a chain other than the
+   * one the catalogue was indexed from would produce links that are not real.
+   */
+  const jobRepository = createJobRepository(db);
+  const jobReader = createErc8183JobReader({ env, logger });
+
   app.decorate('services', {
-    agents: createAgentService(agentRepository),
+    agents: createAgentService(agentRepository, jobRepository),
     categories: createCategoryService(createCategoryRepository(db)),
+    jobs: createJobService({
+      repository: jobRepository,
+      agents: agentRepository,
+      reader: jobReader,
+      logger,
+    }),
     reputation: createReputationService({
       repository: createReputationRepository(db),
       source: chainReader,
@@ -146,6 +167,7 @@ export async function buildServer({
     }),
     search: createSearchService({
       repository: agentRepository,
+      jobs: jobRepository,
       ai: createAiProvider(env),
       logger,
     }),
@@ -224,6 +246,7 @@ export async function buildServer({
   await app.register(agentRoutes, { prefix: API_PREFIX });
   await app.register(categoryRoutes, { prefix: API_PREFIX });
   await app.register(hiringRoutes, { prefix: API_PREFIX });
+  await app.register(jobRoutes, { prefix: API_PREFIX });
   await app.register(reputationRoutes, { prefix: API_PREFIX });
   await app.register(searchRoutes, { prefix: API_PREFIX });
   await app.register(statsRoutes, { prefix: API_PREFIX });
