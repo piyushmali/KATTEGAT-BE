@@ -315,7 +315,21 @@ export function createAgentRepository(db: Database): AgentRepository {
          * seven thousand registrations old, on both the discovery grid and the landing
          * page's arrivals list.
          */
-        return [sql`${agents.agentId} ${sql.raw(direction)}`];
+        /*
+         * `nulls last` is not about nulls. `agent_id` is NOT NULL, so it cannot change which
+         * rows come back or in what order.
+         *
+         * It is there to match the index. `ORDER BY x DESC` means `DESC NULLS FIRST` in
+         * Postgres, while the index on this column is `DESC NULLS LAST` — which is what
+         * Drizzle's `.desc()` emits. The planner matches sort orderings strictly, so those two
+         * spellings did not line up and it fell back to a parallel sequential scan of all
+         * 317,476 rows plus a top-N heapsort: 139ms, measured, on the one query the discovery
+         * grid and the landing page both open with.
+         *
+         * Written explicitly rather than by changing the index, because every other branch in
+         * this switch already spells its null ordering out.
+         */
+        return [sql`${agents.agentId} ${sql.raw(direction)} nulls last`];
     }
   }
 

@@ -120,6 +120,26 @@ export const agents = pgTable(
     index('agents_metadata_backlog_idx')
       .on(table.metadataAttempts, table.agentId.desc())
       .where(sql`${table.metadataResolvedAt} is null`),
+    /*
+     * Serves the default sort, which is `agent_id desc` — see `orderBy` in
+     * modules/agents/agent.repository.ts for why the id and not `registered_at`.
+     *
+     * The unique `(chain_id, agent_id)` index above cannot do it: a composite index is only
+     * ordered within its leading column, so ordering by `agent_id` alone got a parallel
+     * sequential scan of all 317,476 rows and a sort, measured at 121ms on every request to the
+     * discovery grid and the landing page. Both open on this sort, so it was the hottest query
+     * in the product paying the largest avoidable cost.
+     */
+    index('agents_agent_id_desc_idx').on(table.agentId.desc()),
+    /*
+     * The same sort for the query that actually runs most: the discovery grid defaults to
+     * complete records only, so it pairs `agent_id desc` with this predicate. Partial, so it
+     * indexes the ~244k resolved rows rather than all of them, and the planner gets the order
+     * and the filter from one structure instead of sorting and then discarding.
+     */
+    index('agents_resolved_agent_id_idx')
+      .on(table.agentId.desc())
+      .where(sql`${table.metadataResolvedAt} is not null`),
   ],
 );
 

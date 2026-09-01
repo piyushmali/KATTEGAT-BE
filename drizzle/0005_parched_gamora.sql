@@ -1,0 +1,2 @@
+CREATE INDEX "agents_agent_id_desc_idx" ON "agents" USING btree ("agent_id" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "agents_resolved_agent_id_idx" ON "agents" USING btree ("agent_id" DESC NULLS LAST) WHERE "agents"."metadata_resolved_at" is not null;

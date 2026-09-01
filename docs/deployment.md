@@ -98,6 +98,15 @@ Use the `libpq` `pg_restore`, not the one beside a local Postgres 14 server. The
 rule for crossing versions is to use tools at least as new as the target, and Neon
 is newer. `brew install libpq` provides them without a second server.
 
+Then **run `ANALYZE`**, which `pg_restore` does not:
+
+```bash
+psql "$NEON_URL" -c "ANALYZE;"     # a few seconds
+```
+
+Not optional. A restored table has no statistics, so the planner guesses, and it
+guesses badly enough to seq-scan a table it has a perfectly good index for.
+
 Confirm before moving on:
 
 ```bash
@@ -105,6 +114,10 @@ psql "$NEON_URL" -c "SELECT count(*) FROM agents;"       # 317,476
 psql "$NEON_URL" -c "SELECT count(*) FROM agent_jobs;"   # 56,681
 psql "$NEON_URL" -c "SELECT pg_size_pretty(pg_database_size(current_database()));"
 ```
+
+Measured on a Singapore Neon project, Postgres 18.6: restore 1m54s with `-j 3`,
+**414 MB** on disk against the 512 MB ceiling, 19 indexes and 4 foreign keys
+rebuilt, 5 Drizzle migrations already recorded.
 
 ### 2. Render
 
