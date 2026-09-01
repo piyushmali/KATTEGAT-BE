@@ -2,7 +2,10 @@ import { loadEnv } from '../../config/env.js';
 import { createDatabase } from '../../infrastructure/database/client.js';
 import { createLogger } from '../../infrastructure/logging/logger.js';
 import { createChainReader } from '../../integrations/erc8004/chain-reader.js';
+import { createErc8183JobReader } from '../../integrations/erc8183/job-reader.js';
 import { createAgentRepository } from '../agents/agent.repository.js';
+import { createJobRepository } from '../jobs/job.repository.js';
+import { jobSweepHasMore, sweepJobs } from './job-sync.js';
 import {
   backfillAgents,
   backfillHasMore,
@@ -23,6 +26,8 @@ import {
  *   pnpm sync:agents --backfill --loop   repeat until the registry is exhausted
  *   pnpm sync:agents --metadata --loop   fetch the registration files discovery deferred
  *   pnpm sync:agents --reputation --loop read the ReputationRegistry for every agent
+ *   pnpm sync:agents --jobs --loop       index ERC-8183 jobs from the escrow kernel
+ *   pnpm sync:agents --jobs --refresh --loop  re-read jobs that have not settled yet
  *
  * `--loop` is a long job — the full registry is ~300k ids at roughly 65 ids/sec — so it
  * reports progress with an ETA and stops cleanly on SIGINT, finishing the pass in flight
@@ -231,6 +236,82 @@ async function main(): Promise<void> {
               idsPerSecond: Math.round(swept / elapsed),
             },
             'reputation sweep progress',
+          );
+        }
+      }
+
+      /*
+       * ERC-8183 jobs: the escrowed work agents were actually paid for.
+       *
+       * Its own mode because it reads a different contract for a different standard and shares
+       * none of the agent pipeline. Two passes with different endings, hence the flag rather
+       * than one loop: discovery catches up with the job counter and stops, refresh re-reads
+       * whatever has not settled and rewinds. See job-sync.ts.
+       */
+      if (process.argv.includes('--jobs')) {
+        const jobDeps = {
+          db: handle.db,
+          logger,
+          jobs: createErc8183JobReader({ env, logger }),
+          repository: createJobRepository(handle.db),
+          refresh: process.argv.includes('--refresh'),
+        };
+
+        let requested = 0;
+        let read = 0;
+        let written = 0;
+        let relinked = 0;
+        let passes = 0;
+        const startedAt = Date.now();
+
+        for (;;) {
+          const result = await sweepJobs({
+            ...jobDeps,
+            ...(limit === undefined ? {} : { limit }),
+          });
+          requested += result.requested;
+          read += result.read;
+          written += result.written;
+          relinked += result.relinked;
+          passes += 1;
+
+          const done = !jobSweepHasMore(result);
+          if (!loop || done || stopping) {
+            process.stdout.write(
+              `${JSON.stringify(
+                {
+                  mode: 'jobs',
+                  pass: result.pass,
+                  passes,
+                  requested,
+                  read,
+                  written,
+                  relinked,
+                  throughJobId: result.toJobId,
+                  remaining: result.remaining,
+                  done,
+                  stoppedEarly: stopping && !done,
+                  elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+                },
+                null,
+                2,
+              )}\n`,
+            );
+            return;
+          }
+
+          const elapsed = Math.max(1, (Date.now() - startedAt) / 1000);
+          const perSecond = read / elapsed;
+          logger.info(
+            {
+              passes,
+              throughJobId: result.toJobId,
+              remaining: result.remaining,
+              written,
+              jobsPerSecond: Number(perSecond.toFixed(1)),
+              etaMinutes: Number((result.remaining / Math.max(1, perSecond) / 60).toFixed(1)),
+            },
+            'job sweep progress',
           );
         }
       }

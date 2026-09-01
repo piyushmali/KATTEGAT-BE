@@ -1,12 +1,7 @@
 import {
-  createPublicClient,
-  fallback,
   getAddress,
-  http,
   parseAbiItem,
-  type PublicClient,
 } from 'viem';
-import { bsc } from 'viem/chains';
 import type { Logger } from 'pino';
 import type { Env } from '../../config/env.js';
 import { upstreamUnavailable } from '../../shared/errors.js';
@@ -25,6 +20,7 @@ import type {
   DiscoveredAgent,
   DiscoveryPage,
 } from '../agent-source.js';
+import { createBscClient, REGISTRY_CHAIN } from '../bsc-client.js';
 import { identityRegistryAbi, reputationRegistryAbi } from './abi.js';
 import { decodeScore } from '../../modules/reputation/score.js';
 import type { ProtocolTag } from './registration-file.js';
@@ -218,24 +214,12 @@ function unresolvedProfile(agentId: number): AgentProfile {
 }
 
 export function createChainReader({ env, logger }: ChainReaderOptions): ChainAgentSource {
-  const endpoints = [env.BSC_RPC_URL, env.BSC_RPC_URL_FALLBACK].filter(
-    (url): url is string => typeof url === 'string' && url.length > 0,
-  );
-
-  // `fallback` rotates to the next endpoint on transport errors, which is the
-  // whole of our RPC resilience story (docs/integrations.md).
-  const client: PublicClient = createPublicClient({
-    chain: bsc,
-    transport: fallback(
-      endpoints.map((url) => http(url, { timeout: 15_000, retryCount: 2 })),
-      { rank: false },
-    ),
-  });
+  const client = createBscClient(env);
 
   const identityAddress = getAddress(env.ERC8004_IDENTITY_REGISTRY);
   const reputationAddress = getAddress(env.ERC8004_REPUTATION_REGISTRY);
 
-  const toGlobalId = (agentId: number): string => `${String(bsc.id)}:${String(agentId)}`;
+  const toGlobalId = (agentId: number): string => `${String(REGISTRY_CHAIN.id)}:${String(agentId)}`;
 
   async function latestBlock(): Promise<number> {
     try {
@@ -370,7 +354,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
 
           const identity = {
             id,
-            chainId: bsc.id,
+            chainId: REGISTRY_CHAIN.id,
             agentId: numericId,
             ownerAddress: candidate.owner.toLowerCase(),
             walletAddress: candidate.walletAddress,
@@ -985,7 +969,7 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
 
   return {
     name: SOURCE_NAME,
-    chainId: bsc.id,
+    chainId: REGISTRY_CHAIN.id,
     latestBlock,
     discover,
     reputation,

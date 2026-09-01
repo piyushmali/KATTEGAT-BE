@@ -22,6 +22,20 @@
       "when": 1788181554321,
       "tag": "0002_lazy_bloodscream",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788242543873,
+      "tag": "0003_sloppy_inhumans",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788244003018,
+      "tag": "0004_new_masque",
+      "breakpoints": true
     }
   ]
 }
