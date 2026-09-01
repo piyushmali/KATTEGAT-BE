@@ -63,8 +63,6 @@ which is the point: the deployed catalogue is a snapshot on a 512 MB free tier a
 the registry grows ~130 MB a month, so ingestion writing there is a decision with a
 deadline rather than a default. See [`deployment.md`](deployment.md).
 
-````
-
 **Which one to run.** Incremental replays logs and is bounded by the endpoint's log
 retention — roughly two hours on any free tier, so it only ever sees recent
 registrations. Backfill walks agent ids with plain `eth_call`, which has no retention
@@ -108,9 +106,9 @@ successful run, the cursor and any error.
 **Imports use relative paths with an explicit `.js` extension.**
 
 ```ts
-import { loadEnv } from '../config/env.js';   // correct
-import { loadEnv } from '@/config/env';       // wrong — breaks at runtime
-````
+import { loadEnv } from '../config/env.js'; // correct
+import { loadEnv } from '@/config/env'; // wrong — breaks at runtime
+```
 
 The build is NodeNext ESM and `tsc` does not rewrite specifiers, so a path alias
 compiles and then fails at runtime. **The frontend uses the opposite convention** —
