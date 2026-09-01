@@ -5,11 +5,11 @@ import {
   type JobStatusName,
 } from '@altananetwork/sdk';
 import type { Logger } from 'pino';
-import type { PublicClient } from 'viem';
+import type { Address, PublicClient } from 'viem';
 import type { Env } from '../../config/env.js';
 import { upstreamUnavailable } from '../../shared/errors.js';
 import { createBscClient, REGISTRY_CHAIN } from '../bsc-client.js';
-import { commerceAbi, policyAbi } from './abi.js';
+import { commerceAbi, policyAbi, routerAbi } from './abi.js';
 
 /**
  * Reading ERC-8183 jobs: the escrowed work agents were actually paid for.
@@ -108,6 +108,26 @@ export interface JobRead {
   deliverableHash: string | null;
 }
 
+/**
+ * The verdict policy a hire must bind, resolved against the chain.
+ *
+ * Not a constant, because the address the SDK pins is only correct on some chains. See the note
+ * on `policyWhitelist` in abi.ts: an unwhitelisted policy cannot be bound, and an unbound policy
+ * means the kernel will not fund the job at all.
+ */
+export interface EscrowPolicy {
+  address: Address;
+  /** Seconds a delivered job is held before the escrow can be released. */
+  disputeWindowSeconds: number;
+  /**
+   * False when no known policy on this chain is whitelisted.
+   *
+   * Hiring is impossible in that state, and it is reported rather than thrown so a caller can
+   * say so plainly instead of offering a button that cannot work.
+   */
+  usable: boolean;
+}
+
 export interface Erc8183JobReader {
   chainId: number;
   addresses: Erc8183Addresses;
@@ -115,11 +135,20 @@ export interface Erc8183JobReader {
   explorerUrl: string;
   /** Highest minted job id, which for a 1-indexed counter is also the count. */
   jobCounter(): Promise<number>;
-  /** Seconds between submission and when the escrow may be released. */
-  disputeWindowSeconds(): Promise<number>;
+  /** The policy the router will accept here, and its dispute window. Resolved once. */
+  escrowPolicy(): Promise<EscrowPolicy>;
   /** Reads the given ids. Jobs that fail to decode are skipped, not guessed at. */
   readJobs(ids: readonly number[]): Promise<JobRead[]>;
 }
+
+/**
+ * A policy observed bound to a real funded job on BSC testnet, and whitelisted there.
+ *
+ * The fallback when the SDK's pinned address is not accepted. Taken from testnet job 500 rather
+ * than guessed, and only ever used after `policyWhitelist` confirms it, so this going stale in
+ * turn degrades to "hiring unavailable" rather than to a job that cannot be funded.
+ */
+const OBSERVED_TESTNET_POLICY = '0xd6a4217588F6B1F5657a92A3e94E6422aD771cEA' as const;
 
 const ZERO_BYTES32 = `0x${'0'.repeat(64)}`;
 
@@ -178,6 +207,59 @@ export function createErc8183JobReader({
   const chainId = REGISTRY_CHAIN.id;
   const addresses = erc8183Addresses(chainId);
 
+  /**
+   * Resolved once and reused. It is a property of the deployment, so re-reading it per request
+   * would put two contract calls on the critical path of rendering a page.
+   *
+   * Cached as the promise rather than the result, so concurrent first requests share one probe.
+   * Cleared on failure below, so an RPC blip does not poison it for the process lifetime.
+   */
+  let policy: Promise<EscrowPolicy> | null = null;
+
+  const resolvePolicy = async (): Promise<EscrowPolicy> => {
+    try {
+      for (const candidate of [addresses.policy, OBSERVED_TESTNET_POLICY]) {
+        const whitelisted = await client.readContract({
+          address: addresses.router,
+          abi: routerAbi,
+          functionName: 'policyWhitelist',
+          args: [candidate],
+        });
+        if (!whitelisted) continue;
+
+        const window = await client.readContract({
+          address: candidate,
+          abi: policyAbi,
+          functionName: 'disputeWindow',
+        });
+
+        if (candidate !== addresses.policy) {
+          logger.warn(
+            { pinned: addresses.policy, using: candidate },
+            'the SDK ERC-8183 policy is not whitelisted on this chain; using an observed one',
+          );
+        }
+
+        return { address: candidate, disputeWindowSeconds: Number(window), usable: true };
+      }
+
+      /*
+       * Reported rather than thrown. Escrow history still reads fine without a usable policy —
+       * only commissioning new work needs one — so this degrades the hire path alone.
+       */
+      logger.warn(
+        { router: addresses.router, pinned: addresses.policy },
+        'no whitelisted ERC-8183 policy found; hiring through escrow is unavailable',
+      );
+      return { address: addresses.policy, disputeWindowSeconds: 0, usable: false };
+    } catch (error) {
+      policy = null;
+      throw upstreamUnavailable('could not resolve the ERC-8183 escrow policy', {
+        cause: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
   return {
     chainId,
     addresses,
@@ -198,20 +280,7 @@ export function createErc8183JobReader({
       }
     },
 
-    async disputeWindowSeconds() {
-      try {
-        const window = await client.readContract({
-          address: addresses.policy,
-          abi: policyAbi,
-          functionName: 'disputeWindow',
-        });
-        return Number(window);
-      } catch (error) {
-        throw upstreamUnavailable('could not read the ERC-8183 dispute window', {
-          cause: error instanceof Error ? error.message : String(error),
-        });
-      }
-    },
+    escrowPolicy: () => (policy ??= resolvePolicy()),
 
     async readJobs(ids) {
       if (ids.length === 0) return [];

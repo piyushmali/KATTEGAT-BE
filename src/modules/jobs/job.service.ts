@@ -1,4 +1,3 @@
-import type { Logger } from 'pino';
 import { notFound } from '../../shared/errors.js';
 import { PAYMENT_TOKEN, type Erc8183JobReader } from '../../integrations/erc8183/job-reader.js';
 import type { AgentRepository } from '../agents/agent.repository.js';
@@ -26,50 +25,25 @@ export interface JobServiceDeps {
   repository: JobRepository;
   agents: AgentRepository;
   reader: Erc8183JobReader;
-  logger: Logger;
 }
 
-/** How long a dispute window reading is reused. It is a deployment constant in practice. */
-const DISPUTE_WINDOW_TTL_MS = 60 * 60 * 1000;
-
-export function createJobService({ repository, agents, reader, logger }: JobServiceDeps): JobService {
-  /*
-   * Cached, because it is read from the policy contract on a path that renders a page, and the
-   * value changes only if the stack is redeployed. Held as the promise so concurrent first
-   * requests share one read rather than racing several.
-   */
-  let disputeWindow: { value: Promise<number>; at: number } | null = null;
-
-  const disputeWindowSeconds = (): Promise<number> => {
-    if (disputeWindow === null || Date.now() - disputeWindow.at > DISPUTE_WINDOW_TTL_MS) {
-      disputeWindow = {
-        at: Date.now(),
-        value: reader.disputeWindowSeconds().catch((error: unknown) => {
-          /*
-           * Cleared so the next request retries rather than caching a failure for an hour.
-           * Rethrown, because a wrong dispute window would misreport when someone's money
-           * moves, and that is worse than an error the client can retry.
-           */
-          disputeWindow = null;
-          logger.warn({ err: error }, 'could not read the ERC-8183 dispute window');
-          throw error;
-        }),
-      };
-    }
-
-    return disputeWindow.value;
-  };
-
+export function createJobService({ repository, agents, reader }: JobServiceDeps): JobService {
   return {
     async listForAgent(agentId, limit) {
       if ((await agents.findById(agentId)) === null) {
         throw notFound(`No agent with id "${agentId}" has been indexed.`);
       }
 
-      const [rows, summary, window] = await Promise.all([
+      const [rows, summary, policy] = await Promise.all([
         repository.listForAgent(agentId, limit),
         repository.summaryForAgent(agentId),
-        disputeWindowSeconds(),
+        /*
+         * The window of the policy actually in use, not of the one the SDK pins. They differ:
+         * on testnet the pinned policy is not whitelisted and holds a 24 hour window while the
+         * accepted one holds 15 minutes. Reporting the wrong one would tell a client their money
+         * moves on a day it does not.
+         */
+        reader.escrowPolicy(),
       ]);
 
       return {
@@ -80,7 +54,7 @@ export function createJobService({ repository, agents, reader, logger }: JobServ
           explorer_url: reader.explorerUrl,
           token_symbol: PAYMENT_TOKEN.symbol,
           token_decimals: PAYMENT_TOKEN.decimals,
-          dispute_window_seconds: window,
+          dispute_window_seconds: policy.disputeWindowSeconds,
           summary: toWireJobSummary(summary),
         },
       };

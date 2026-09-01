@@ -2,6 +2,8 @@ import type { Logger } from 'pino';
 import type { PublicClient } from 'viem';
 import { describe, expect, it } from 'vitest';
 import type { Env } from '../../config/env.js';
+import { erc8183Addresses } from '@altananetwork/sdk';
+import { REGISTRY_CHAIN } from '../bsc-client.js';
 import { createErc8183JobReader } from './job-reader.js';
 
 /**
@@ -18,7 +20,7 @@ import { createErc8183JobReader } from './job-reader.js';
  */
 
 const env = { BSC_RPC_URL: 'https://bsc-rpc.publicnode.com' } as Env;
-const logger = { debug: () => undefined } as unknown as Logger;
+const logger = { debug: () => undefined, warn: () => undefined } as unknown as Logger;
 
 /** A zero-filled tuple, exactly as a read for an unminted id decodes. */
 const absentJob = {
@@ -56,6 +58,102 @@ function stubClient(results: unknown[]): PublicClient {
       Promise.resolve(contracts.map((_, i) => ({ status: 'success', result: results[i] }))),
   } as unknown as PublicClient;
 }
+
+/**
+ * Answers `readContract` for policy resolution.
+ *
+ * `whitelisted` names the addresses this fake router accepts, so a test can reproduce a chain
+ * where the SDK's pinned policy is rejected without needing that chain.
+ */
+function policyClient(whitelisted: string[], windowSeconds = 900): PublicClient {
+  return {
+    readContract: ({ functionName, args }: { functionName: string; args?: readonly unknown[] }) => {
+      if (functionName === 'policyWhitelist') {
+        const candidate = String(args?.[0]).toLowerCase();
+        return Promise.resolve(whitelisted.some((a) => a.toLowerCase() === candidate));
+      }
+      if (functionName === 'disputeWindow') return Promise.resolve(BigInt(windowSeconds));
+      throw new Error(`unexpected read: ${functionName}`);
+    },
+  } as unknown as PublicClient;
+}
+
+/** The address the SDK pins for the chain this reader runs on. */
+const SDK_POLICY = erc8183Addresses(REGISTRY_CHAIN.id).policy;
+const OBSERVED_TESTNET_POLICY = '0xd6a4217588F6B1F5657a92A3e94E6422aD771cEA';
+
+/**
+ * A hire binds a verdict policy, and both halves of that can refuse.
+ *
+ * The router will not bind a policy it has not whitelisted, and the kernel will not fund a job
+ * whose hook is the router until one is bound. So a stale policy address does not degrade a hire,
+ * it stops it, and the failure surfaces as two opaque selectors rather than as a message.
+ */
+describe('escrowPolicy', () => {
+  it('uses the SDK policy when the router accepts it', async () => {
+    const reader = createErc8183JobReader({ env, logger, client: policyClient([SDK_POLICY], 604_800) });
+
+    const policy = await reader.escrowPolicy();
+
+    expect(policy.address).toBe(SDK_POLICY);
+    expect(policy.usable).toBe(true);
+    expect(policy.disputeWindowSeconds).toBe(604_800);
+  });
+
+  it('falls back to an observed policy when the pinned one is not whitelisted', async () => {
+    /*
+     * The measured state of BSC testnet: the router is a proxy that appears upgraded past the
+     * address the SDK pins, so registerJob reverts and fund then reverts with PolicyNotSet.
+     */
+    const reader = createErc8183JobReader({
+      env,
+      logger,
+      client: policyClient([OBSERVED_TESTNET_POLICY], 900),
+    });
+
+    const policy = await reader.escrowPolicy();
+
+    expect(policy.address).toBe(OBSERVED_TESTNET_POLICY);
+    expect(policy.usable).toBe(true);
+    // The window comes from the policy in use, not the pinned one. 15 minutes, not 24 hours.
+    expect(policy.disputeWindowSeconds).toBe(900);
+  });
+
+  it('reports hiring as unavailable rather than picking a policy that cannot be bound', async () => {
+    const reader = createErc8183JobReader({ env, logger, client: policyClient([]) });
+
+    const policy = await reader.escrowPolicy();
+
+    /*
+     * Reported, not thrown. Escrow history still reads fine without a usable policy, so this has
+     * to degrade the hire path alone. Returning a policy marked usable would offer a button whose
+     * transaction always reverts.
+     */
+    expect(policy.usable).toBe(false);
+    expect(policy.disputeWindowSeconds).toBe(0);
+  });
+
+  it('resolves once and reuses the answer', async () => {
+    let reads = 0;
+    const counting = {
+      readContract: ({ functionName, args }: { functionName: string; args?: readonly unknown[] }) => {
+        reads += 1;
+        if (functionName === 'policyWhitelist') {
+          return Promise.resolve(String(args?.[0]).toLowerCase() === SDK_POLICY.toLowerCase());
+        }
+        return Promise.resolve(900n);
+      },
+    } as unknown as PublicClient;
+
+    const reader = createErc8183JobReader({ env, logger, client: counting });
+    await reader.escrowPolicy();
+    const after = reads;
+    await reader.escrowPolicy();
+
+    // A deployment constant, so re-reading it would put two calls on every page render.
+    expect(reads).toBe(after);
+  });
+});
 
 describe('readJobs', () => {
   it('drops a job whose returned id is not the one asked for', async () => {

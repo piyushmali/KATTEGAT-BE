@@ -157,7 +157,6 @@ export async function buildServer({
       repository: jobRepository,
       agents: agentRepository,
       reader: jobReader,
-      logger,
     }),
     reputation: createReputationService({
       repository: createReputationRepository(db),

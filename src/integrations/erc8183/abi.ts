@@ -52,14 +52,36 @@ export const policyAbi = [
     /**
      * Seconds a submitted job waits before `settle` may release the escrow.
      *
-     * Read rather than assumed because it differs by deployment: 7 days on mainnet against
-     * 1 day on testnet, measured. Hardcoding either would misreport when a client's money
-     * actually moves.
+     * Read rather than assumed because it differs by deployment: 7 days on mainnet, and on
+     * testnet 15 minutes for the policy actually in use against 24 hours for the one the SDK
+     * pins. Hardcoding any of them would misreport when a client's money actually moves.
      */
     type: 'function',
     name: 'disputeWindow',
     stateMutability: 'view',
     inputs: [],
     outputs: [{ type: 'uint64' }],
+  },
+] as const;
+
+export const routerAbi = [
+  {
+    /**
+     * Whether the EvaluatorRouter will bind this policy to a job.
+     *
+     * Load-bearing for hiring, not a detail. Every job the SDK builds names the router as both
+     * evaluator and hook, and the kernel refuses to fund a job whose hook is the router until a
+     * policy is bound to it (`PolicyNotSet`). The router in turn refuses to bind a policy that
+     * is not whitelisted. So a stale policy address does not degrade a hire, it stops it.
+     *
+     * Measured: the address in `ERC8183_ADDRESSES[56].policy` is whitelisted on mainnet and the
+     * one in `[97].policy` is not whitelisted on testnet, where the router is a proxy that
+     * appears to have been upgraded past it.
+     */
+    type: 'function',
+    name: 'policyWhitelist',
+    stateMutability: 'view',
+    inputs: [{ type: 'address' }],
+    outputs: [{ type: 'bool' }],
   },
 ] as const;
