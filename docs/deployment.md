@@ -25,9 +25,11 @@ covers one service running continuously (730), so staying awake costs nothing.
 
 ## Capacity, and why the catalogue is a snapshot
 
-The database is 562 MB locally. A dump and restore drops it to 469 MB by shedding
-ingestion bloat, and `scripts/snapshot.sh` takes it to **413 MB** — inside Neon's
-512 MB with 99 MB spare.
+The database is 576 MB locally at 325,546 agents. A dump and restore drops it to
+487 MB by shedding ingestion bloat, and `scripts/snapshot.sh` takes it to **432
+MB** — inside Neon's 512 MB with 80 MB spare. It was 413 MB at 317,476 agents, so
+budget roughly 2.4 MB per thousand agents when deciding whether another refresh
+still fits.
 
 That headroom only holds because **the deployed catalogue is a snapshot, not a
 live index.** The registry grows at roughly 150-275 agents an hour. At about 1 KB
@@ -44,6 +46,31 @@ overall health, so a snapshot shows `status: ok` with `ingestion: stale`, and th
 Upgrade path, if the project outlives the demo: Neon's paid tier removes the
 storage ceiling, and the workflow's `DATABASE_URL` secret can then point at it and
 keep the deployed catalogue live. Nothing in the code changes.
+
+### The other ceiling: compute hours
+
+Storage is the ceiling everyone plans for. The one that actually took this
+deployment down is compute.
+
+Neon's free plan allows 100 CU-hours per project per month and suspends the
+compute for the rest of the cycle when a project exceeds it. It also suspends an
+idle project after about five minutes, which is what keeps normal usage cheap: the
+compute only bills while something is talking to it.
+
+Those two facts combine badly with a keepalive. Render's free instance sleeps after
+15 minutes, so a scheduled ping every 10 minutes is needed to keep the API warm.
+Point that ping at anything that queries Postgres and the database never gets its
+five idle minutes, so it bills continuously: 24 hours a day at the 0.25 CU floor is
+about 90 CU-hours a month, which exhausts the allowance on its own, before a single
+visitor or any of the restores above.
+
+This is why `/live` exists alongside `/health`. `/health` runs two queries because
+reporting ingestion freshness is worth queries; `/live` runs none. The keepalive
+workflow pings `/live` every 10 minutes and `/health` every 6 hours, so Render stays
+warm, the database is still checked often enough to catch a real failure, and the
+compute sleeps the rest of the time. `src/app/health.routes.test.ts` asserts that
+`/live` touches no database, because a query added there would break nothing
+visible and reappear weeks later as a suspended project.
 
 ### What the snapshot trims
 
@@ -118,6 +145,57 @@ psql "$NEON_URL" -c "SELECT pg_size_pretty(pg_database_size(current_database()))
 Measured on a Singapore Neon project, Postgres 18.6: restore 1m54s with `-j 3`,
 **414 MB** on disk against the 512 MB ceiling, 19 indexes and 4 foreign keys
 rebuilt, 5 Drizzle migrations already recorded.
+
+#### Refreshing the catalogue later
+
+Not the same operation as the restore above, and the difference cost this
+deployment a day. **Restore into a new project, then repoint `DATABASE_URL`.** Do
+not drop and restore in place.
+
+```bash
+# 1. new project in the same region, then:
+export NEON_URL='postgresql://…new-project…?sslmode=require'
+./scripts/snapshot.sh "$LOCAL_DATABASE_URL" /tmp/kattegat-snapshot.dump
+/opt/homebrew/opt/libpq/bin/pg_restore \
+  --no-owner --no-privileges -j 1 -d "$NEON_URL" /tmp/kattegat-snapshot.dump
+psql "$NEON_URL" -c "ANALYZE;"
+# 2. update DATABASE_URL on Render and .env.neon, then delete the old project
+```
+
+Two reasons, both learned the hard way.
+
+**Storage counts history, so an in-place refresh can double it.** Dropping 414 MB
+does not free 414 MB straight away; the old pages are retained for the branch's
+restore window. Restoring 432 MB on top of that is a peak well past 512 MB even
+though the final database is comfortably inside it. A fresh project starts from
+nothing and has no such peak.
+
+**The refresh itself is billed, and the free plan suspends a project that runs
+past its allowance.** Each attempt moves the whole dump over the network and runs
+the compute hard while it rebuilds 19 indexes. Repeat that a few times and the
+project trips the monthly CU-hour or transfer limit, at which point Neon suspends
+the compute for the rest of the cycle. A suspended compute refuses every
+connection before authentication, on both the pooled and direct endpoints, and
+`psql` reports only `server closed the connection unexpectedly`. It looks exactly
+like a crash or a bad password and is neither, so budget the attempts: restore
+once, with `-j 1`, into somewhere you were not relying on.
+
+If you drop schemas anyway, **recreate `public` explicitly**:
+
+```sql
+DROP SCHEMA IF EXISTS drizzle CASCADE;
+DROP SCHEMA IF EXISTS public CASCADE;
+CREATE SCHEMA public;                  -- required; the dump does not create it
+```
+
+`pg_dump` emits `CREATE SCHEMA drizzle` but never `CREATE SCHEMA public`, because
+Postgres treats `public` as already existing. Drop it without recreating it and the
+restore fails 68 times over with `schema "public" does not exist`, having loaded
+nothing. Confirm with:
+
+```bash
+pg_restore -f - /tmp/kattegat-snapshot.dump | grep -i '^CREATE SCHEMA'
+```
 
 ### 2. Render
 

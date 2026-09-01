@@ -3,12 +3,24 @@ import type { FastifyPluginAsyncZod } from 'fastify-type-provider-zod';
 import { syncState } from '../infrastructure/database/schema.js';
 
 /**
- * Liveness and readiness.
+ * Liveness and readiness, deliberately split.
  *
  * `/health` is intentionally more than `{ ok: true }`: it reports the database
  * and the last ingestion result, because the failure this backend is most likely
  * to hit is "chain sync has been quietly failing for an hour" — which a naive
  * health check reports as perfectly healthy.
+ *
+ * `/live` exists because that richness has a running cost. The host sleeps when
+ * idle, so something must ping it continuously to keep it warm, and every
+ * `/health` ping runs two queries. On a managed Postgres that suspends its
+ * compute when idle and bills the awake time against a monthly allowance, a
+ * ping every ten minutes never lets it sleep, and the keepalive quietly spends
+ * the database's whole monthly budget on proving the web process is up.
+ *
+ * So the two questions get two endpoints. "Is the process up?" is answered
+ * without a single query, which is what a keepalive actually needs to ask. "Is
+ * the system serving correct data?" still costs queries, and is asked on a
+ * schedule that can afford them.
  */
 
 const healthResponseSchema = z.object({
@@ -29,7 +41,31 @@ const healthResponseSchema = z.object({
 /** Above this, ingestion is reported as failing rather than merely stale. */
 const FAILURE_THRESHOLD = 3;
 
+const liveResponseSchema = z.object({
+  status: z.literal('ok'),
+  uptime_seconds: z.number(),
+});
+
 export const healthRoutes: FastifyPluginAsyncZod = (app) => {
+  app.get(
+    '/live',
+    {
+      schema: {
+        operationId: 'live',
+        tags: ['system'],
+        summary: 'Process liveness, touching no dependencies',
+        response: { 200: liveResponseSchema },
+      },
+      config: { rateLimit: false },
+    },
+    // Deliberately queries nothing. Answering this must never wake the database,
+    // because a keepalive calls it every few minutes forever. See the note above.
+    () => ({
+      status: 'ok' as const,
+      uptime_seconds: Math.round(process.uptime()),
+    }),
+  );
+
   app.get(
     '/health',
     {

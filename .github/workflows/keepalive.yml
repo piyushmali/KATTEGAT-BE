@@ -4,20 +4,33 @@ name: Keep the API warm
 # request waits about a minute while it starts. That minute lands on whoever arrives first, which
 # during judging is the worst possible person to spend it on.
 #
-# So this pings /health often enough to stay under that window. It is not a workaround for a
-# broken service: the instance is healthy, it is asleep, and the platform documents both.
+# So this pings often enough to stay under that window. It is not a workaround for a broken
+# service: the instance is healthy, it is asleep, and the platform documents both.
 #
-# WHY THIS IS WITHIN THE FREE ALLOWANCE
+# WHY TWO SCHEDULES, AND WHY THE FREQUENT ONE AVOIDS THE DATABASE
 #
-# Render grants 750 instance hours a month per workspace. One service running continuously is 730,
-# so staying awake fits with 20 hours to spare. The ping itself is a single GET returning a few
-# hundred bytes.
+# The first version of this pinged /health every 10 minutes, and that took the site down.
 #
-# WHY /health AND NOT /
+# /health runs two queries, by design, because it reports database and ingestion state. Neon
+# suspends a project's compute when idle and bills the awake time against a monthly allowance
+# (100 CU-hours on the free plan). A query every 10 minutes never lets it idle, so the keepalive
+# held the compute awake around the clock and spent the database's entire monthly budget proving
+# that the web process was up. Neon then suspended the compute for the rest of the cycle, which
+# refuses every connection, and the API served 503s.
 #
-# `/` is a 404 on this API, which would still wake the service but would also fill the logs with
-# failures and make a real problem harder to spot. /health answers 200 and additionally proves the
-# database is reachable, so a failed ping is a genuine signal rather than noise.
+# The two questions are now asked separately, at the frequency each is worth:
+#
+#   every 10 minutes  ->  /live    keeps Render awake, runs no queries, costs the database nothing
+#   every 6 hours     ->  /health  proves the database and ingestion are actually healthy
+#
+# Waking Neon four times a day is negligible against the allowance, and it still catches a dead
+# database within a few hours. Between those checks the compute is allowed to sleep, which is the
+# behaviour the free plan is priced around.
+#
+# WHY NOT /
+#
+# `/` is a 404 on this API. It would still wake the service but would fill the logs with failures
+# and make a real problem harder to spot.
 #
 # COST
 #
@@ -27,9 +40,11 @@ name: Keep the API warm
 
 on:
   schedule:
-    # Every 10 minutes, comfortably inside the 15-minute idle window even when GitHub delays a
-    # scheduled run, which it does not guarantee to be punctual about.
+    # Liveness. Every 10 minutes, comfortably inside the 15-minute idle window even when GitHub
+    # delays a scheduled run, which it does not guarantee to be punctual about.
     - cron: '*/10 * * * *'
+    # Readiness. Offset off the hour so it does not collide with the liveness run.
+    - cron: '7 */6 * * *'
   workflow_dispatch:
 
 # A queued ping is worthless once a later one has run, so never wait.
@@ -43,7 +58,7 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      - name: Wake the API and check it is actually healthy
+      - name: Wake the API
         env:
           API_URL: ${{ vars.API_URL }}
         run: |
@@ -56,23 +71,49 @@ jobs:
 
           # --max-time 120, because a cold start is about a minute and the point of this request
           # is to absorb that wait rather than to fail on it.
+          code=$(curl -sS --max-time 120 -o /dev/null -w '%{http_code}' "$API_URL/live") || {
+            echo "::error::ping failed to complete"
+            exit 1
+          }
+
+          echo "GET /live -> HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "::error::/live returned HTTP $code"
+            exit 1
+          fi
+
+      # Gated so the frequent run never reaches the database. Runs on the 6-hourly schedule and
+      # on a manual dispatch, where someone is asking on purpose.
+      - name: Check the database and ingestion are healthy
+        if: github.event.schedule == '7 */6 * * *' || github.event_name == 'workflow_dispatch'
+        env:
+          API_URL: ${{ vars.API_URL }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${API_URL:-}" ]; then
+            echo "API_URL repository variable is not set; nothing to check."
+            exit 0
+          fi
+
           body=$(curl -sS --max-time 120 -w '\n%{http_code}' "$API_URL/health") || {
-            echo "ping failed to complete"
+            echo "::error::health check failed to complete"
             exit 1
           }
 
           code=$(printf '%s' "$body" | tail -n1)
           payload=$(printf '%s' "$body" | sed '$d')
 
-          echo "HTTP $code"
+          echo "GET /health -> HTTP $code"
           echo "$payload"
 
-          # A 200 whose database is down is not healthy, and this is the only scheduled thing
-          # looking at production, so it checks the payload rather than just the status line.
           if [ "$code" != "200" ]; then
             echo "::error::API returned HTTP $code"
             exit 1
           fi
+
+          # A 200 whose database is down is not healthy, and this is the only scheduled thing
+          # looking at production, so it checks the payload rather than just the status line.
           case "$payload" in
             *'"database":"up"'*) echo "database up" ;;
             *) echo "::error::API answered 200 but reports the database as unavailable"; exit 1 ;;
