@@ -120,7 +120,7 @@ export async function buildServer({
   app.setSerializerCompiler(serializerCompiler);
 
   app.decorate('appVersion', APP_VERSION);
-  app.decorate('database', database ?? createDatabase(env));
+  app.decorate('database', database ?? createDatabase(env, { logger }));
 
   /*
    * Composition root. Every dependency is constructed here and injected; no

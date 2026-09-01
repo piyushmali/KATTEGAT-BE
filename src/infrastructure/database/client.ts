@@ -1,5 +1,6 @@
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
+import type { Logger } from 'pino';
 import type { Env } from '../../config/env.js';
 import * as schema from './schema.js';
 
@@ -36,6 +37,16 @@ export interface DatabaseHandle {
 
 export interface DatabaseOptions {
   /**
+   * Where a failed liveness probe reports itself.
+   *
+   * Optional so tests can build a handle without one, and worth having because the alternative
+   * was silence: `ping` swallowed its error, so `/health` could say `database: down` while the
+   * logs said nothing at all about why. Diagnosing a deployment then meant guessing between a
+   * wrong password, a missing SSL parameter and an unreachable host, none of which look
+   * different from the outside.
+   */
+  logger?: Logger;
+  /**
    * Seconds a pooled connection may sit idle before it is closed.
    *
    * Overridable so the advisory-lock regression test can force the condition that broke it.
@@ -44,6 +55,21 @@ export interface DatabaseOptions {
    * timeout and proves the lock survives the pool reaping connections around it.
    */
   idleTimeoutSeconds?: number;
+}
+
+/**
+ * Host and database from a connection string, for logging.
+ *
+ * Parsed rather than logged whole, because the string carries a password. Says which server was
+ * being dialled without putting the credential in a log aggregator.
+ */
+function hostOf(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.host}${parsed.pathname}`;
+  } catch {
+    return '(unparseable DATABASE_URL)';
+  }
 }
 
 export function createDatabase(env: Env, options: DatabaseOptions = {}): DatabaseHandle {
@@ -85,7 +111,22 @@ export function createDatabase(env: Env, options: DatabaseOptions = {}): Databas
       try {
         await sql`select 1`;
         return true;
-      } catch {
+      } catch (error) {
+        /*
+         * Logged, not swallowed. `/health` reports a boolean because that is all a status page
+         * needs, but the boolean is useless to whoever has to fix it: a wrong password, a
+         * missing `sslmode=require` and a host that does not resolve all render as
+         * `database: down`.
+         *
+         * The driver's `code` is the useful half — 28P01 is authentication, 28000 covers the
+         * insecure-connection refusal, ENOTFOUND is DNS — so it is surfaced separately rather
+         * than left inside a message string.
+         */
+        const detail = error as { code?: string; message?: string };
+        options.logger?.error(
+          { err: error, code: detail.code, host: hostOf(env.DATABASE_URL) },
+          'database ping failed',
+        );
         return false;
       }
     },
