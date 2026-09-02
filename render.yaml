@@ -27,9 +27,21 @@ services:
     startCommand: pnpm start
 
     # Render restarts the service when this stops answering, and uses it to decide a deploy
-    # succeeded. /health reports database reachability, so a service that cannot reach Neon fails
-    # the deploy rather than serving errors.
-    healthCheckPath: /health
+    # succeeded. That is a liveness question — "is this process serving?" — so it points at
+    # /live, which answers without touching Postgres.
+    #
+    # It used to point at /health, on the reasoning that a service which cannot reach its
+    # database should fail the deploy rather than serve errors. That reasoning does not survive
+    # contact with what the check actually does. /health runs two queries, so a slow or
+    # saturated database makes it slow, Render concludes the process is dead and restarts it.
+    # Restarting a web process does not repair a database: it discards the warm stats cache,
+    # adds a cold start, and if the database is still slow the new process fails the same check.
+    # A degraded dependency becomes a restart loop, which is a worse outage than the degradation.
+    #
+    # The database is still watched, deliberately and separately: keepalive.yml calls /health
+    # every six hours and fails loudly if it does not report `database: up`. Readiness is
+    # reported, liveness is acted on, and the two are no longer the same signal.
+    healthCheckPath: /live
 
     envVars:
       - key: NODE_ENV

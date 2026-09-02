@@ -55,7 +55,30 @@ export interface DatabaseOptions {
    * timeout and proves the lock survives the pool reaping connections around it.
    */
   idleTimeoutSeconds?: number;
+  /**
+   * Milliseconds a single statement may run before Postgres aborts it.
+   *
+   * Overridable for the same reason as above: the default is far too long to wait in a test,
+   * so `statement-timeout.test.ts` sets a small one and proves a runaway query is cancelled.
+   */
+  statementTimeoutMs?: number;
 }
+
+/**
+ * Ceiling on a single statement.
+ *
+ * Without one, a query can run until the connection dies, holding a slot in a pool of ten.
+ * Enough of those and every later request queues for a connection, including `/health`,
+ * whose failure Render reads as a dead process and answers by restarting it — which frees
+ * nothing, because the queries were the database's work, not the web process's.
+ *
+ * Thirty seconds, not the two or three a request budget suggests, because it is a stop for a
+ * runaway rather than a latency target. The slowest legitimate query here is the landing
+ * page's stats aggregate at 9.4s uncached, and a deliberately broad search count is around
+ * 10s; a tighter ceiling would start failing work that is merely slow on a 0.1 CPU instance.
+ * Anything past thirty seconds is not slow, it is stuck.
+ */
+const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
 
 /**
  * Host and database from a connection string, for logging.
@@ -77,6 +100,11 @@ export function createDatabase(env: Env, options: DatabaseOptions = {}): Databas
     max: env.NODE_ENV === 'production' ? 10 : 4,
     idle_timeout: options.idleTimeoutSeconds ?? 20,
     connect_timeout: 10,
+    // Server-side ceiling, set per connection. Enforced by Postgres rather than by us, so it
+    // still applies to a query whose client has already given up and gone away.
+    connection: {
+      statement_timeout: options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS,
+    },
     // Silences postgres.js' own notice logging; ours goes through pino.
     onnotice: () => {},
   });
