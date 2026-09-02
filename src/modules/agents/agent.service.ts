@@ -38,6 +38,7 @@ export function toRepositoryFilters(query: AgentFilterQuery): ListAgentsFilters 
   if (query.q) filters.query = query.q;
   if (query.trait) filters.traits = query.trait;
   if (query.resolved_only !== undefined) filters.resolvedOnly = query.resolved_only;
+  if (query.has_endpoint !== undefined) filters.hasEndpoint = query.has_endpoint;
   if (query.min_confidence !== undefined) filters.minConfidence = query.min_confidence;
   return filters;
 }

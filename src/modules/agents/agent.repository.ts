@@ -54,6 +54,8 @@ export interface ListAgentsFilters {
   query?: string;
   /** Only agents whose registration file resolved. */
   resolvedOnly?: boolean;
+  /** Only agents that declared an interface, so there is something to call. */
+  hasEndpoint?: boolean;
   /** Minimum classification confidence, applied with `category`. */
   minConfidence?: number;
   traits?: string[];
@@ -251,6 +253,16 @@ export function createAgentRepository(db: Database): AgentRepository {
 
     if (filters.resolvedOnly === true) {
       conditions.push(sql`${agents.metadataResolvedAt} is not null`);
+    }
+
+    /*
+     * `unconfigured` is the tag for an agent that published no interface, so this is
+     * "has somewhere to call" rather than a protocol choice. Written as an inequality against
+     * the one excluded value instead of an IN list of the four included ones, so a protocol
+     * added to the taxonomy later is included by default rather than silently filtered out.
+     */
+    if (filters.hasEndpoint === true) {
+      conditions.push(sql`${agents.protocolTag} <> 'unconfigured'`);
     }
 
     if (filters.query) {

@@ -1,0 +1,1 @@
+CREATE INDEX "agents_hireable_agent_id_idx" ON "agents" USING btree ("agent_id" DESC NULLS LAST) WHERE "agents"."protocol_tag" <> 'unconfigured' and "agents"."metadata_resolved_at" is not null;

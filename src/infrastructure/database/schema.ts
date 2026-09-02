@@ -169,6 +169,22 @@ export const agents = pgTable(
      * an index costs more than it saves. Selective traits are what this is for.
      */
     index('agents_trait_tags_idx').using('gin', table.traitTags),
+    /*
+     * Serves the discovery grid's default: an endpoint, resolved metadata, newest first.
+     *
+     * Partial on the same predicate the grid sends, so it indexes the 87,930 usable agents
+     * rather than all 325,546, and carries `agent_id desc` so the sort comes from the index
+     * instead of a top-N heapsort over the matches.
+     *
+     * `unconfigured` is the tag for "published no interface", so excluding it is what "has
+     * somewhere to call" means. See the note on `has_endpoint` in modules/agents/agent.schema.ts
+     * for why that became the default view.
+     */
+    index('agents_hireable_agent_id_idx')
+      .on(table.agentId.desc())
+      .where(
+        sql`${table.protocolTag} <> 'unconfigured' and ${table.metadataResolvedAt} is not null`,
+      ),
   ],
 );
 

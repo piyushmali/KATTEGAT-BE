@@ -338,6 +338,40 @@ describe('GET /api/v1/agents', () => {
    * agent ever becomes possible, or a filter starts referencing that table, the count breaks
    * here rather than quietly reporting inflated totals in production.
    */
+  /**
+   * `has_endpoint` is the discovery grid's default, so it decides what almost every visitor
+   * sees first. It exists because 117,564 of 325,546 agents share one endpoint-less
+   * registration file, which resolves instantly and therefore dominated newest-first.
+   *
+   * Asserted against `protocol` rather than trusted as equivalent to it: `protocol` selects one
+   * interface, this asks for any, and the two are easy to conflate into a filter that silently
+   * excludes a protocol added to the taxonomy later.
+   */
+  it('filters to agents that declared an interface', async () => {
+    guard();
+    const [all, withEndpoint] = await Promise.all([
+      app.inject({ method: 'GET', url: `/api/v1/agents?trait=${FIXTURE_TRAIT}&per_page=100` }),
+      app.inject({
+        method: 'GET',
+        url: `/api/v1/agents?trait=${FIXTURE_TRAIT}&has_endpoint=true&per_page=100`,
+      }),
+    ]);
+
+    expect(all.statusCode).toBe(200);
+    expect(withEndpoint.statusCode).toBe(200);
+
+    type Page = { data: { identity: { id: string }; profile: { protocol_tag: string } }[] };
+    const everything = all.json<Page>().data;
+    const hireable = withEndpoint.json<Page>().data;
+
+    // Four fixtures, one of which published no interface.
+    expect(everything).toHaveLength(4);
+    expect(hireable).toHaveLength(3);
+
+    expect(hireable.map((a) => a.identity.id)).not.toContain(NEWEST);
+    expect(hireable.every((a) => a.profile.protocol_tag !== 'unconfigured')).toBe(true);
+  });
+
   it('counts each matching agent exactly once', async () => {
     guard();
     const response = await app.inject({

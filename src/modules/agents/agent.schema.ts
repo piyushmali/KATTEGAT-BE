@@ -47,6 +47,22 @@ export const agentFilterQuerySchema = z.object({
     .enum(['true', 'false'])
     .transform((value) => value === 'true')
     .optional(),
+  /**
+   * Only agents that published somewhere to call.
+   *
+   * Distinct from `protocol`, which selects one interface. This asks for any of them, which
+   * the enum cannot express and which is the more useful question: an agent with no endpoint
+   * cannot be invoked or hired, so it is a registry entry rather than a usable agent.
+   *
+   * It exists because the live registry is dominated by entries that are not usable. 117,564
+   * of 325,546 agents share a single registration file, none of which declares an endpoint, so
+   * browsing newest-first returned page after page of the same name. Filtering on this leaves
+   * 87,930 agents and 493 distinct names in the newest 500.
+   */
+  has_endpoint: z
+    .enum(['true', 'false'])
+    .transform((value) => value === 'true')
+    .optional(),
   min_confidence: z.coerce.number().min(0).max(1).optional(),
 });
 

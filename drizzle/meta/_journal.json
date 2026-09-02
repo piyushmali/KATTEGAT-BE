@@ -57,6 +57,13 @@
       "when": 1788269351670,
       "tag": "0007_optimal_red_ghost",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788327953110,
+      "tag": "0008_past_killraven",
+      "breakpoints": true
     }
   ]
 }
