@@ -32,11 +32,35 @@ name: Keep the API warm
 # `/` is a 404 on this API. It would still wake the service but would fill the logs with failures
 # and make a real problem harder to spot.
 #
+# MEASURED: THIS IS NOT KEEPING THE SERVICE AWAKE ON ITS OWN
+#
+# Read the run history before trusting the cron above. On this repository, scheduled runs are
+# arriving roughly every two hours rather than every ten minutes:
+#
+#   06:23  04:16  01:26  23:30  21:21  20:58  18:43  16:30  15:08  11:13
+#
+# Gaps of 2h07m, 2h50m, 1h56m. GitHub does not guarantee punctuality for scheduled workflows
+# and deprioritises high-frequency crons, especially on private repositories with a metered
+# minute allowance. Render sleeps after 15 minutes, so a ping every two hours leaves the
+# service asleep for the overwhelming majority of the day, and the first visitor after each
+# gap pays the full cold start.
+#
+# So this workflow is a backup and a health check, not the mechanism. Something external has to
+# do the pinging:
+#
+#   - UptimeRobot free: 5-minute checks, and it emails when the service is actually down.
+#     Comfortably inside the 15-minute window, and the alerting is worth as much as the ping.
+#   - cron-job.org free: 1-minute resolution if you want more margin.
+#
+# Point either at $API_URL/live, which answers without touching the database.
+#
 # COST
 #
-# Public repositories get unlimited Actions minutes. On a private repository this would consume
-# roughly 4,300 minutes a month against a 2,000 allowance, so it must stay public or move to an
-# external cron.
+# Public repositories get unlimited Actions minutes. On a private repository the configured
+# cadence would want roughly 4,300 minutes a month against a 2,000 allowance, which is a large
+# part of why GitHub is throttling it. Making the repository public removes the cap and improves
+# scheduling priority, but it still does not make the schedule reliable — only an external
+# pinger does.
 
 on:
   schedule:
