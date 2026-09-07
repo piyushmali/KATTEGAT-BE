@@ -119,15 +119,24 @@ const envSchema = z
     /**
      * Native amount sent to a new user wallet, in wei.
      *
-     * Measured: a full grant, act and revoke lifecycle costs 962,143 gas, which at BSC's
-     * 0.05 gwei is 0.0000481 BNB, about three US cents. The default is roughly twenty times
-     * that, so a user can hire, act and revoke several times over without returning to us,
-     * and a compromised sponsor key still leaks almost nothing per request.
+     * 0.005 BNB, and the previous 0.001 was the reason first hires failed with "an error
+     * occurred while executing calls".
+     *
+     * The old figure was sized from on-chain gas alone: a grant/act/revoke lifecycle measured
+     * 962,143 gas, about 0.0000481 BNB, and 0.001 was ~20x that. But the Altana relay charges a
+     * separate fee per call, carried as `value` on each call in `wallet_prepareCalls`, and that
+     * fee dominates: measured at ~0.000675 BNB per call from a real failing request. A grant is
+     * two calls (~0.00135) and a commission is five (~0.0034), so 0.001 could not even cover a
+     * single grant's fees, and the relay rejected the batch before anything executed.
+     *
+     * 0.005 clears a commission's fees plus its gas with headroom. A compromised sponsor key
+     * still leaks only this much per fresh address, and at the sponsor's small float that is a
+     * few dozen hires, which is what a demo and early use need.
      */
     AGENT_GAS_SPONSOR_AMOUNT_WEI: z
       .string()
       .regex(/^\d{1,30}$/)
-      .default('1000000000000000'),
+      .default('5000000000000000'),
 
     /**
      * Per-address sponsorship ceiling in wei.
@@ -135,11 +144,14 @@ const envSchema = z
      * Without this the sponsor endpoint is a drain: anyone can call it in a loop and empty
      * the key. Enforced against the address's current balance, so a wallet that already has
      * gas is refused rather than topped up again.
+     *
+     * 0.01, above the 0.005 grant so a wallet part-way through its funds is still topped up
+     * for the next action rather than stranded just under the old ceiling.
      */
     AGENT_GAS_SPONSOR_MAX_BALANCE_WEI: z
       .string()
       .regex(/^\d{1,30}$/)
-      .default('5000000000000000'),
+      .default('10000000000000000'),
   })
   .superRefine((env, ctx) => {
     // An "enabled" AI provider with no credentials is a silent 500 later, so
