@@ -126,6 +126,37 @@ export function createGasSponsor({
 
       try {
         const transactionHash = await wallet.sendTransaction({ to: recipient, value: amount });
+
+        /*
+         * Wait for the funding to confirm before returning, because the caller grants a session
+         * the instant this resolves and a grant is a transaction the freshly-funded wallet has to
+         * pay for itself.
+         *
+         * `sendTransaction` resolves on broadcast, not on inclusion. Without this wait the backend
+         * told the browser "funded" while the transfer was still in the mempool, the grant fired
+         * against a wallet still reading a zero balance, and the SDK failed with "an error occurred
+         * while executing calls" — a first hire that raced its own gas and lost. On BSC's ~3s
+         * blocks the confirmation is quick.
+         *
+         * Fail-open, and deliberately so. If the receipt does not arrive inside the bound the
+         * transfer has still been broadcast and will almost certainly land; blocking the hire on a
+         * slow read endpoint would trade a rare race for a common hang. The grant may then still
+         * race, which is no worse than before this existed.
+         */
+        try {
+          const publicClient = await reader.client();
+          await publicClient.waitForTransactionReceipt({
+            hash: transactionHash,
+            timeout: 20_000,
+            confirmations: 1,
+          });
+        } catch (waitError) {
+          logger.warn(
+            { recipient, transactionHash, err: waitError },
+            'funding broadcast but not confirmed within the wait; proceeding',
+          );
+        }
+
         logger.info(
           { recipient, amount: formatEther(amount), transactionHash },
           'sponsored wallet gas',
