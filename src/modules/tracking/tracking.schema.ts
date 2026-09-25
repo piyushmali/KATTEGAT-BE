@@ -69,8 +69,24 @@ export const trackedHireSchema = z.object({
 export const listedAgentSchema = z.object({
   agent_id: z.string(),
   name: z.string(),
-  /** Null across the board today: the backfill walks ids and records no registration block. */
+  /**
+   * Null for nearly every agent: the ID-walk backfill records no block timestamp, and filling
+   * one would cost a `getBlockByNumber` per agent. `registered_at_block` and
+   * `registration_tx_hash` below carry the same information in a form the log sweep can supply.
+   */
   registered_at: z.string().nullable(),
+  registered_at_block: z.number().int().nullable(),
+  /**
+   * The registration transaction, which is the proof for the builder half of the quest.
+   *
+   * With it, "this wallet listed an agent" stops being KATTEGAT's claim: the transaction's own
+   * `Registered` log names the registry, the agent id and the owner, so a verifier can confirm
+   * the listing without trusting this endpoint or knowing how to call the registry.
+   *
+   * Null means not yet harvested, never not registered — see docs/integrations.md for why the
+   * sweep that fills it runs separately from ingestion.
+   */
+  registration_tx_hash: z.string().nullable(),
   categories: z.array(z.string()),
 });
 

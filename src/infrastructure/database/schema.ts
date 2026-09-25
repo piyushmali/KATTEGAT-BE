@@ -82,6 +82,22 @@ export const agents = pgTable(
     registeredAtBlock: bigint('registered_at_block', { mode: 'number' }),
     registeredAt: timestamp('registered_at', { withTimezone: true }),
 
+    /**
+     * The `Registered` transaction that put this agent on chain.
+     *
+     * Provenance a verifier can check without trusting us: paste it into BscScan and the
+     * registry, the agent id and the owner are all there. Stronger than our word and
+     * cheaper than asking someone to call the registry themselves.
+     *
+     * Nullable and filled by its own job rather than by ingestion, because the two
+     * discovery paths differ. Log replay has the hash in hand (`log.transactionHash`) but
+     * only reaches recent blocks; the ID-walk backfill that found ~99.9% of the catalogue
+     * reads `tokenURI`/`ownerOf` per id and never sees a log at all. Threading the field
+     * through the ingestion pipeline would therefore have written null for almost every
+     * row. See scripts/backfill-registration-tx.ts.
+     */
+    registrationTxHash: text('registration_tx_hash'),
+
     /** Which integration produced this row — see integrations/agent-source.ts. */
     source: text('source').notNull(),
     /** Null until the registration file resolves; drives the "partial data" UI. */

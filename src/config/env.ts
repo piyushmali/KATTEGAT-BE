@@ -73,6 +73,22 @@ const envSchema = z
     BSC_RPC_URL_FALLBACK: optionalUrl(),
 
     /**
+     * An endpoint that will serve `eth_getLogs` over old block ranges.
+     *
+     * Deliberately optional with no default, and read only by
+     * scripts/backfill-registration-tx.ts — never by the request path. The default
+     * `BSC_RPC_URL` cannot do this job: every free keyless endpoint measured either
+     * refuses historical log queries outright ("Archive requests require a personal
+     * token") or caps the range at 25-10,000 blocks, and the registry's history is
+     * ~45M blocks deep. See docs/integrations.md for the measurements.
+     *
+     * No default because the one endpoint found to serve it is a shared free-tier URL,
+     * and a borrowed credential belongs in an operator-run batch job, not baked into a
+     * deployment where its disappearance would look like our bug.
+     */
+    BSC_ARCHIVE_RPC_URL: optionalUrl(),
+
+    /**
      * `.prefault` rather than `.default`: Zod's `.default()` short-circuits and
      * returns the literal untouched, so a checksummed default would skip the
      * lowercasing that provided values get and produce addresses that compare

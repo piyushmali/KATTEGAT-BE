@@ -48,6 +48,8 @@ export interface TrackedAgentRow {
   agentId: string;
   name: string;
   registeredAt: Date | null;
+  registeredAtBlock: number | null;
+  registrationTxHash: string | null;
 }
 
 export interface TrackedJobRow {
@@ -114,14 +116,23 @@ export function createTrackingRepository(db: Database): TrackingRepository {
             agentId: agents.id,
             name: agents.name,
             registeredAt: agents.registeredAt,
+            registeredAtBlock: agents.registeredAtBlock,
+            /*
+             * The proof for the builder half of the quest.
+             *
+             * Without it, "this wallet listed an agent" is a claim a verifier has to take on
+             * trust or go and check against the registry themselves. The transaction shows the
+             * owner address in its own logs, so it answers the question directly.
+             */
+            registrationTxHash: agents.registrationTxHash,
           })
           .from(agents)
           .where(sql`lower(${agents.ownerAddress}) = lower(${walletAddress})`)
           /*
-           * By id descending rather than registration time: `registered_at` is null for every row
-           * because the backfill walks ids without recording a block, so ordering by it would be
-           * arbitrary. Ids are assigned in registration order, so this is the same ordering the
-           * missing column would have given.
+           * By id descending rather than registration time: `registered_at` is null for nearly
+           * every row because the ID-walk backfill records no block timestamp, so ordering by it
+           * would be arbitrary. Ids are assigned in registration order, so this is the same
+           * ordering the missing column would have given.
            */
           .orderBy(desc(agents.agentId))
           .limit(limit)

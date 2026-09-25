@@ -74,6 +74,7 @@ Response element:
     "wallet_address": "0x95fe…",
     "agent_uri": "https://…/agent.json",
     "registered_at_block": 118434236,
+    "registration_tx_hash": "0x6aa02880abb22db4dfa61b0ca5f80eb863470d046cd1cb8b87ee0a32630d7f0c",
     "registered_at": "2026-08-27T18:47:55.000Z"
   },
   "profile": {

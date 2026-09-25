@@ -95,6 +95,14 @@ export const agentIdentitySchema = z.object({
   agent_uri: z.string().nullable(),
   registered_at_block: z.number().int().nullable(),
   registered_at: z.string().nullable(),
+  /**
+   * The registration transaction on the registry's chain.
+   *
+   * Nullable rather than required: it is harvested from `Registered` logs by a separate
+   * job, so a freshly ingested agent can be complete in every other respect while this is
+   * still pending. Absence means "not harvested yet", never "not registered".
+   */
+  registration_tx_hash: z.string().nullable(),
 });
 
 export const agentEndpointSchema = z.object({

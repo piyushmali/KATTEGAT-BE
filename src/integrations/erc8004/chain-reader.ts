@@ -361,6 +361,20 @@ export function createChainReader({ env, logger }: ChainReaderOptions): ChainAge
             agentUri: candidate.agentUri,
             registeredAtBlock: candidate.registeredAtBlock,
             registeredAt: candidate.registeredAt,
+            /*
+             * Owned by scripts/backfill-registration-tx.ts, not by ingestion.
+             *
+             * Log replay could fill this from `log.transactionHash`, but the ID-walk
+             * backfill — which found all but 466 of the catalogue — never reads a log and
+             * has nothing to offer. Carrying a field that only one of two discovery paths
+             * can populate would put null on 99.9% of rows and imply ingestion maintains
+             * something it does not. The sweep covers both paths from one place.
+             *
+             * Safe to leave null here: `upsertMany`'s conflict clause lists its columns
+             * explicitly and does not include this one, so re-ingesting a harvested agent
+             * cannot erase its hash.
+             */
+            registrationTxHash: null,
           };
 
           if (identity.agentUri === null) {

@@ -32,6 +32,7 @@ registration file yielded.
 | `capabilities`         | text[]           | Skills, domains and tags from the registration file                 |
 | `raw_metadata`         | jsonb null       | The document as fetched                                             |
 | `registered_at_block`  | bigint null      |                                                                     |
+| `registration_tx_hash` | text null        | The `Registered` transaction. Filled by the sweep, not by ingestion  |
 | `registered_at`        | timestamptz null | Block timestamp                                                     |
 | `source`               | text             | Which integration produced the row                                  |
 | `metadata_resolved_at`  | timestamptz null | **Null = registration file unresolved**                             |

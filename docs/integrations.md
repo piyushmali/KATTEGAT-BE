@@ -103,16 +103,23 @@ ingestion depends on. Measured:
 | `bsc.meowrpc.com`               | method not supported                   |
 | `1rpc.io/bnb`                   | capped at 50 blocks                    |
 | `bsc.blockrazor.xyz`            | capped at 25 blocks                    |
-| `bsc.drpc.org`                  | rate limited on the free tier          |
+| `bsc.drpc.org`                  | 10,000-block cap, then a hard IP rate limit |
+| `bsc.nodereal.io`               | rejected — `limit exceeded`            |
+| `bsc-dataseed-public.bnbchain.org` | rejected — `limit exceeded`         |
+| `binance.llamarpc.com`          | empty body, no error — unusable        |
+| `bnb.api.onfinality.io/public`  | HTTP 429 on the first request          |
+| `bsc-pokt.nodies.app`           | paid plan required                     |
+| NodeReal `/v1/<key>` (free)     | **works over the full history**, 50,000-block windows |
 
-Defaults are set to the two that work. `viem`'s `fallback` transport rotates on
-transport errors.
+Defaults are set to the two that work for ordinary forward sync. `viem`'s `fallback`
+transport rotates on transport errors.
 
 ### Log retention limits backfill
 
-No free endpoint offers archive access. Historical `eth_getCode` and `eth_getLogs`
-both answer `Archive requests require a personal token`. Bisection put usable log
-retention at roughly **8,000 blocks** — about two hours at BSC block times.
+`bsc-rpc.publicnode.com`, the default, offers no archive access at all. Historical
+`eth_getCode` and `eth_getLogs` both answer `Archive requests require a personal
+token`, for any block, at any range width. Bisection put usable log retention there at
+roughly **8,000 blocks** — about two hours at BSC block times.
 
 Consequences, and how the code handles them:
 
@@ -129,6 +136,61 @@ Consequences, and how the code handles them:
 
 Forward incremental sync works on the free endpoints indefinitely; only reaching
 backwards is limited.
+
+### Correction: one free endpoint does serve the full log history
+
+This section used to claim no free endpoint offers archive access. That was true of
+every endpoint measured at the time and is false in general. NodeReal's free
+`/v1/<key>` endpoint serves `eth_getLogs` in **50,000-block windows across the entire
+chain**, and serves historical `eth_getCode` too.
+
+Re-measured while closing the registration-provenance gap:
+
+- Bisecting `eth_getCode` against it put the identity registry's deployment at block
+  **79,027,268** — 27 requests. The technique the section above calls impossible works
+  fine given an endpoint that answers historical state reads.
+- A 50,000-block window near the head returns ~1,460 `Registered` logs; the densest
+  measured is well inside any result cap. Registration density across the range runs
+  0 to 1,460 per window.
+- The whole history is ~45M blocks, so **899 windows** cover it.
+
+What has *not* changed is the conclusion for ingestion. The ID walk is still the right
+backfill: it needs no archive access, no borrowed credential and no window tuning, and
+it reads the registry's current state rather than replaying its past. The archive
+endpoint is used for exactly one thing — the registration-transaction sweep below —
+and never from the request path.
+
+### The registration-transaction sweep
+
+`agents.registration_tx_hash` is what lets a visitor verify a listing without trusting
+us: one hash in BscScan shows the registry, the agent id and the owner. It is filled by
+`src/modules/ingestion/registration-tx.ts`, run as `pnpm backfill:registration-tx`.
+
+It is a separate sweep with its own `sync_state` cursor (`56:identity:tx`) rather than
+part of ingestion, because only one of the two discovery paths ever sees a log. Log
+replay has `log.transactionHash` in hand but reaches only recent blocks; the ID walk
+that found all but 466 of the catalogue reads `ownerOf`/`tokenURI` per id and touches
+no logs. Carrying the field through `AgentSource` would have written null for 99.9% of
+rows. `upsertMany`'s conflict clause lists its columns explicitly and omits this one,
+which is what stops a re-ingest from erasing a harvest.
+
+Two behaviours worth knowing:
+
+- **The window is self-calibrating, not configured.** It starts at 50,000 and halves on
+  a range refusal, so it works against an endpoint nobody has measured. The measured
+  caps span 25 to 50,000, which is too wide a spread for one sensible default.
+- **Throttles are waited out, not narrowed.** NodeReal answers a rate limit with
+  -32005, the same code the dataseeds use for an over-wide range, and viem renders both
+  as `LimitExceededRpcError`. Telling them apart matters: narrowing a throttled window
+  means more requests for less data each. The first full run managed 39 windows in 28
+  seconds before being cut off, which is why there is also a 250 ms pause between
+  windows — this is somebody else's free tier.
+
+Requires `BSC_ARCHIVE_RPC_URL`. Deliberately no default: the endpoint that serves this
+is a shared free-tier URL, and a borrowed credential belongs in a job an operator is
+watching, not in a deployment where its disappearance would read as our bug. After the
+history is harvested the cursor sits near the head, so keeping coverage current needs
+only recent blocks — which the ordinary endpoint does serve.
 
 ### The ID walk: why backfill does not use logs at all
 

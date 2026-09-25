@@ -1,0 +1,1 @@
+ALTER TABLE "agents" ADD COLUMN "registration_tx_hash" text;

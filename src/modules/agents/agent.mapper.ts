@@ -47,6 +47,7 @@ export function toWireAgent(
       agent_uri: agent.identity.agentUri,
       registered_at_block: agent.identity.registeredAtBlock,
       registered_at: iso(agent.identity.registeredAt),
+      registration_tx_hash: agent.identity.registrationTxHash,
     },
     profile: {
       name: agent.profile.name,

@@ -183,6 +183,7 @@ function toSummary(
       agentUri: row.agentUri,
       registeredAtBlock: row.registeredAtBlock,
       registeredAt: row.registeredAt,
+      registrationTxHash: row.registrationTxHash,
     },
     profile: {
       /*
@@ -318,9 +319,17 @@ export function createAgentRepository(db: Database): AgentRepository {
          * information as the timestamp and it is never null.
          *
          * `registered_at` is only populated for agents found by log replay, which is 466
-         * of 317,476, because the ID-walk backfill does not read the `Registered` event and
-         * free RPC tiers cannot serve enough log history to backfill it. Leading the sort
-         * with `registered_at ... nulls last` therefore ranked by *which ingestion path
+         * of 317,476, because the ID-walk backfill does not read the `Registered` event.
+         *
+         * This comment used to add "and free RPC tiers cannot serve enough log history to
+         * backfill it", which turned out to be wrong — NodeReal's free tier serves the whole
+         * history, and the registration-transaction sweep now walks it. The sweep fills
+         * `registered_at_block` on the way past, but not `registered_at`: a timestamp needs a
+         * `getBlockByNumber` per distinct block, which is ~300,000 extra calls for a column
+         * nothing sorts by, when the block number already links straight to the explorer.
+         *
+         * So the ordering below stands, on the first reason rather than the second. Leading
+         * the sort with `registered_at ... nulls last` ranked by *which ingestion path
          * found the agent* before ranking by when it registered: those 466 rows are ids
          * 309,443 to 310,018 from one stale replay window, and they sorted ahead of 7,458
          * genuinely newer agents. "Recently registered" opened on an agent that was over

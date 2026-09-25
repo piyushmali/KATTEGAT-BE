@@ -30,6 +30,8 @@ export interface AgentIdentity {
   agentUri: string | null;
   registeredAtBlock: number | null;
   registeredAt: Date | null;
+  /** The `Registered` transaction, for independent verification. Null until harvested. */
+  registrationTxHash: string | null;
 }
 
 /** Off-chain descriptive data. May be unresolved — see `metadataResolvedAt`. */

@@ -92,11 +92,26 @@ describe('trackingService.forWallet', () => {
       hiresByWallet: () => Promise.resolve(hires),
       categoriesFor: categoriesFor(map),
       agentsByOwner: () =>
-        Promise.resolve([{ agentId: '56:99', name: 'Mine', registeredAt: null }]),
+        Promise.resolve([
+          {
+            agentId: '56:99',
+            name: 'Mine',
+            registeredAt: null,
+            registeredAtBlock: 118_434_236,
+            registrationTxHash: `0x${'ab'.repeat(32)}`,
+          },
+        ]),
     }).forWallet('0xabc');
 
     expect(both.data.quest.complete).toBe(true);
     expect(both.data.quest.agents_listed_count).toBe(1);
+    /*
+     * The builder half of the quest has to be checkable without trusting this endpoint: the
+     * transaction's own `Registered` log names the owner, so a verifier can confirm the listing
+     * directly. Asserted because "wallet listed an agent" is otherwise only our word.
+     */
+    expect(both.data.agents_listed[0]?.registration_tx_hash).toBe(`0x${'ab'.repeat(32)}`);
+    expect(both.data.agents_listed[0]?.registered_at_block).toBe(118_434_236);
   });
 
   it('credits every category an agent carries, not only its primary', async () => {

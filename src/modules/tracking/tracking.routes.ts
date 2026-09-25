@@ -25,7 +25,7 @@ export const trackingRoutes: FastifyPluginAsyncZod = (app) => {
         tags: ['tracking'],
         summary: 'Quest progress and hiring evidence for one wallet',
         description:
-          'Everything needed to verify a wallet against the Set and Earn quest: which of the four campaign categories it has hired in, whether it owns an agent in the catalogue, and the evidence behind both. `quest.complete` is the single field a verifier can read if it reads nothing else; every hire carries `granted_tx_hash` so the grant can be confirmed on chain independently. Address matching is case-insensitive, because session wallets are stored checksummed and registry owners lowercased. An unknown wallet is a 200 with empty lists rather than a 404: "this wallet did nothing" is an answer, not a missing resource.',
+          'Everything needed to verify a wallet against the Set and Earn quest: which of the four campaign categories it has hired in, whether it owns an agent in the catalogue, and the evidence behind both. `quest.complete` is the single field a verifier can read if it reads nothing else. Both halves of the quest come with on-chain proof: every hire carries `granted_tx_hash` for the session grant, and every listed agent carries `registration_tx_hash` for the registration, whose own `Registered` log names the owner. Neither has to be taken on trust. Address matching is case-insensitive, because session wallets are stored checksummed and registry owners lowercased. An unknown wallet is a 200 with empty lists rather than a 404: "this wallet did nothing" is an answer, not a missing resource.',
         params: walletParamSchema,
         response: { 200: walletTrackingResponseSchema },
       },

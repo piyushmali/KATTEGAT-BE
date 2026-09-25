@@ -127,6 +127,8 @@ export function createTrackingService({
             agent_id: agent.agentId,
             name: agent.name,
             registered_at: agent.registeredAt?.toISOString() ?? null,
+            registered_at_block: agent.registeredAtBlock,
+            registration_tx_hash: agent.registrationTxHash,
             categories: labelled(agent.agentId).all,
           })),
           escrow_jobs: jobs.map((job) => ({
