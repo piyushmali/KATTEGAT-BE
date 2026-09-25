@@ -22,7 +22,10 @@ import { createAgentRepository } from '../modules/agents/agent.repository.js';
 import { createAgentService, type AgentService } from '../modules/agents/agent.service.js';
 import { agentRoutes } from '../modules/agents/agent.routes.js';
 import { createCategoryRepository } from '../modules/categories/category.repository.js';
-import { createCategoryService, type CategoryService } from '../modules/categories/category.service.js';
+import {
+  createCategoryService,
+  type CategoryService,
+} from '../modules/categories/category.service.js';
 import { categoryRoutes } from '../modules/categories/category.routes.js';
 import { createGasSponsor } from '../integrations/altana/gas-sponsor.js';
 import { createKeystoreReader } from '../integrations/altana/keystore.js';
@@ -44,6 +47,13 @@ import { createSearchService, type SearchService } from '../modules/search/searc
 import { searchRoutes } from '../modules/search/search.routes.js';
 import { createStatsService, type StatsService } from '../modules/stats/stats.service.js';
 import { statsRoutes } from '../modules/stats/stats.routes.js';
+import { REGISTRY_CHAIN } from '../integrations/bsc-client.js';
+import { createTrackingRepository } from '../modules/tracking/tracking.repository.js';
+import {
+  createTrackingService,
+  type TrackingService,
+} from '../modules/tracking/tracking.service.js';
+import { trackingRoutes } from '../modules/tracking/tracking.routes.js';
 import { healthRoutes } from './health.routes.js';
 import { registerErrorHandler } from './error-handler.js';
 
@@ -59,6 +69,7 @@ export interface AppServices {
   reputation: ReputationService;
   search: SearchService;
   stats: StatsService;
+  tracking: TrackingService;
 }
 
 declare module 'fastify' {
@@ -191,6 +202,17 @@ export async function buildServer({
       logger,
     }),
     stats: createStatsService(db),
+    tracking: createTrackingService({
+      repository: createTrackingRepository(db),
+      network: altanaNetwork,
+      /*
+       * The registry chain, not the hiring chain. Agents are read from ERC-8004 on BSC mainnet
+       * while hiring settles wherever ALTANA_NETWORK points, and a verifier reading one number
+       * for both would check the wrong explorer.
+       */
+      registryChainId: REGISTRY_CHAIN.id,
+      identityRegistry: env.ERC8004_IDENTITY_REGISTRY,
+    }),
     hiring: createHiringService({
       repository: createHiringRepository(db),
       keystore: altanaKeystore,
@@ -280,6 +302,7 @@ export async function buildServer({
   await app.register(reputationRoutes, { prefix: API_PREFIX });
   await app.register(searchRoutes, { prefix: API_PREFIX });
   await app.register(statsRoutes, { prefix: API_PREFIX });
+  await app.register(trackingRoutes, { prefix: API_PREFIX });
 
   app.addHook('onClose', async () => {
     await app.database.close();
