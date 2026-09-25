@@ -63,6 +63,29 @@ export const agentFilterQuerySchema = z.object({
     .enum(['true', 'false'])
     .transform((value) => value === 'true')
     .optional(),
+  /**
+   * Only agents the classifier actually placed in a category.
+   *
+   * The third filter in the same family as `resolved_only` and `has_endpoint`, and it exists
+   * for the same measured reason. Those two leave 88,057 agents, but the default sort is
+   * newest-first and the newest registrations are overwhelmingly throwaway: on the live
+   * catalogue, 20 of the newest 24 that pass both filters are `uncategorized`, with names like
+   * "Test", "cat" and "flop". The front page of a marketplace was 83% entries nobody can use.
+   *
+   * Applying this leaves 6,191 agents and all four campaign categories above the fold. A large
+   * cut, and the honest one: an agent the classifier could not place cannot be found by
+   * category, which is how this marketplace is meant to be browsed.
+   *
+   * Not the same question as `min_confidence`, which narrows a category the caller already
+   * named. This asks whether any category was assigned at all.
+   *
+   * Hides nothing — the toggle is in the filter panel, `uncategorized` remains selectable as a
+   * category in its own right, and every count reflects the filter in force.
+   */
+  classified_only: z
+    .enum(['true', 'false'])
+    .transform((value) => value === 'true')
+    .optional(),
   min_confidence: z.coerce.number().min(0).max(1).optional(),
 });
 

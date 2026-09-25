@@ -56,11 +56,25 @@ Paginated discovery.
 | `q`              | string                                                  | Free text over name and description                                                              |
 | `trait`          | string, repeatable                                      | `?trait=x402-paid&trait=multichain` requires **both**                                            |
 | `resolved_only`  | `true` \| `false`                                       | Exclude agents whose registration file never resolved                                            |
+| `has_endpoint`   | `true` \| `false`                                       | Any interface, unlike `protocol` which picks one. Excludes `unconfigured`                         |
+| `classified_only`| `true` \| `false`                                       | Only agents the classifier placed. Excludes those carrying only `uncategorized`                   |
 | `min_confidence` | 0–1                                                     | Applied together with `category`                                                                 |
 | `sort`           | `registered_at` \| `reputation` \| `name` \| `feedback` | Default `registered_at`                                                                          |
 | `direction`      | `asc` \| `desc`                                         | Default `desc`                                                                                   |
 | `page`           | int ≥ 1                                                 | Default 1                                                                                        |
 | `per_page`       | 1–100                                                   | Default 24                                                                                       |
+
+The three filters above default to **on in the discovery UI**, not in the API. The API applies
+only what it is sent, because a filtered default would be a surprise to any other consumer; the
+grid opts in. Each narrows the catalogue a lot — 358,010 indexed, 250,251 with a resolved
+registration file, 88,057 of those declaring an endpoint, 6,191 of those classified — so a client
+comparing a count against the indexed total should send the same filters or expect a difference.
+
+`category` and `classified_only` are independent conditions, not alternatives. Sending
+`category=uncategorized&classified_only=true` asks for agents that hold an `uncategorized`
+assignment *and* a real one, which is answered literally and matches nothing on current data:
+the classifier emits one or the other, and a re-classification replaces an agent's categories
+rather than merging them.
 
 Response element:
 

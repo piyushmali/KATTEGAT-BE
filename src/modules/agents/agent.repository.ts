@@ -56,6 +56,8 @@ export interface ListAgentsFilters {
   resolvedOnly?: boolean;
   /** Only agents that declared an interface, so there is something to call. */
   hasEndpoint?: boolean;
+  /** Only agents the classifier placed somewhere. See `classified_only` in agent.schema.ts. */
+  classifiedOnly?: boolean;
   /** Minimum classification confidence, applied with `category`. */
   minConfidence?: number;
   traits?: string[];
@@ -264,6 +266,25 @@ export function createAgentRepository(db: Database): AgentRepository {
      */
     if (filters.hasEndpoint === true) {
       conditions.push(sql`${agents.protocolTag} <> 'unconfigured'`);
+    }
+
+    /*
+     * `exists` against the categories table rather than a join, for the same reason the
+     * `category` filter below uses one: an agent carries several category rows, and a join
+     * would multiply it into several result rows and inflate the count.
+     *
+     * Written as "has a row that is not uncategorized" rather than "has no uncategorized row".
+     * The classifier always assigns at least one category and gives an unplaced agent
+     * `uncategorized` explicitly, but a multi-category agent can legitimately hold both — so
+     * the negative form would exclude genuinely classified agents.
+     */
+    if (filters.classifiedOnly === true) {
+      conditions.push(
+        sql`exists (select 1 from ${agentCategories} where ${and(
+          eq(agentCategories.agentId, agents.id),
+          sql`${agentCategories.category} <> 'uncategorized'`,
+        )})`,
+      );
     }
 
     if (filters.query) {

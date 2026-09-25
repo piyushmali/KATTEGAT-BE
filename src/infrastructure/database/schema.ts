@@ -232,6 +232,22 @@ export const agentCategories = pgTable(
     primaryKey({ columns: [table.agentId, table.category] }),
     index('agent_categories_category_idx').on(table.category, table.confidence),
     index('agent_categories_primary_idx').on(table.isPrimary, table.category),
+    /*
+     * No partial index for `classified_only`, and that is a measurement rather than an
+     * oversight.
+     *
+     * A `(agent_id) where category <> 'uncategorized'` index was built and benchmarked against
+     * the live catalogue, because the primary key can answer "has a category" but not "has one
+     * that is not uncategorized" without discarding rows. The planner did choose it — and the
+     * paginating count was 345ms either way. Adding it moved the filtering work into the index
+     * and left the real cost untouched: the count walks 60,785 candidate agents and does an
+     * existence check per agent, so the loop count dominates, not the work inside it.
+     *
+     * 345ms is comfortably inside what this schema already tolerates (the stats aggregate is
+     * 9.4s uncached) and the page query itself is 1.5ms, served by
+     * `agents_hireable_agent_id_idx`. An index that changes nothing is not free: it is write
+     * amplification on every classification pass and disk on a 1GB instance.
+     */
   ],
 );
 

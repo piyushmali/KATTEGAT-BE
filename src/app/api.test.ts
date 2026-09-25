@@ -165,6 +165,40 @@ beforeAll(async () => {
       signals: ['keyword:apy'],
       classifierVersion: 'rules-v2',
     },
+    /*
+     * The two cases `classified_only` has to tell apart, and the reason the filter is written
+     * as "has a row that is not uncategorized" rather than "has no uncategorized row".
+     *
+     * NEWEST is what the classifier produces for an agent it could not place: an explicit
+     * `uncategorized` at zero confidence, never an absent row. OUT_OF_RANGE carries that *and*
+     * a real category, which is legitimate — the classifier can place an agent while another
+     * pass leaves the catch-all behind. The negative form of the filter would exclude it, which
+     * is the subtle way this goes wrong: the agent is classified, and would vanish anyway.
+     */
+    {
+      agentId: NEWEST,
+      category: 'uncategorized',
+      confidence: 0,
+      isPrimary: true,
+      signals: ['no-signal-match'],
+      classifierVersion: 'rules-v2',
+    },
+    {
+      agentId: OUT_OF_RANGE,
+      category: 'uncategorized',
+      confidence: 0,
+      isPrimary: false,
+      signals: ['no-signal-match'],
+      classifierVersion: 'rules-v2',
+    },
+    {
+      agentId: OUT_OF_RANGE,
+      category: 'trading-execution',
+      confidence: 0.5,
+      isPrimary: true,
+      signals: ['keyword:latency'],
+      classifierVersion: 'rules-v2',
+    },
   ]);
 
   // 425 at 2 decimals == 4.25. Chosen so a bug that ignores the decimals would
@@ -370,6 +404,90 @@ describe('GET /api/v1/agents', () => {
 
     expect(hireable.map((a) => a.identity.id)).not.toContain(NEWEST);
     expect(hireable.every((a) => a.profile.protocol_tag !== 'unconfigured')).toBe(true);
+  });
+
+  /**
+   * `classified_only` is the discovery grid's third default, and the one with the largest
+   * effect: on the live catalogue it takes 88,057 agents down to 6,191. It exists because
+   * resolving metadata and declaring an endpoint turned out to be a low bar — 20 of the newest
+   * 24 agents clearing both were `uncategorized`, named "Test", "cat", "flop".
+   *
+   * The assertion that matters is OUT_OF_RANGE. It carries `uncategorized` *and* a real
+   * category, which the classifier legitimately produces, so a filter written as "has no
+   * uncategorized row" would drop an agent that is classified. Getting this backwards fails
+   * silently: the grid simply shows fewer agents than it should.
+   */
+  it('filters to agents the classifier actually placed', async () => {
+    guard();
+    const [all, classified] = await Promise.all([
+      app.inject({ method: 'GET', url: `/api/v1/agents?trait=${FIXTURE_TRAIT}&per_page=100` }),
+      app.inject({
+        method: 'GET',
+        url: `/api/v1/agents?trait=${FIXTURE_TRAIT}&classified_only=true&per_page=100`,
+      }),
+    ]);
+
+    expect(all.statusCode).toBe(200);
+    expect(classified.statusCode).toBe(200);
+
+    type Page = { data: { identity: { id: string } }[]; meta: { total: number } };
+    const everything = all.json<Page>();
+    const placed = classified.json<Page>();
+
+    expect(everything.data).toHaveLength(4);
+
+    const ids = placed.data.map((a) => a.identity.id);
+    expect(ids).toHaveLength(3);
+    // Carries `uncategorized` alongside a real category, so it is classified and must stay.
+    expect(ids).toContain(OUT_OF_RANGE);
+    expect(ids).toContain(REBALANCER);
+    expect(ids).toContain(YIELD_AGENT);
+    // Only `uncategorized`, which is what the classifier assigns when it cannot place an agent.
+    expect(ids).not.toContain(NEWEST);
+
+    // The paginating count has to agree with the page, or page 2 offers a row that is not there.
+    expect(placed.meta.total).toBe(3);
+  });
+
+  /**
+   * `category=uncategorized` combined with `classified_only=true` — the combination the
+   * frontend must never send, and why.
+   *
+   * The two filters are independent `exists` clauses, so the API reads the pair literally: "has
+   * an uncategorized row" *and* "has a row that is not uncategorized". That is a coherent
+   * question and it is answered correctly here — OUT_OF_RANGE holds both, so it comes back.
+   *
+   * The problem is that no real agent does. The classifier returns either a single
+   * `uncategorized` assignment or real categories, never both, and `upsertMany` replaces an
+   * agent's categories rather than merging them, so nothing accumulates across taxonomy
+   * versions. Verified against the live catalogue: zero of 358,010 agents hold both.
+   *
+   * So on production data this pair is an empty grid for a category chip the user just clicked.
+   * The API is not wrong to answer it; `use-discovery-params` is responsible for not asking,
+   * which it does by dropping the flag whenever a category is named. This test pins the
+   * behaviour so the frontend guard cannot be removed as redundant.
+   */
+  it('reads category and classified_only as independent conditions', async () => {
+    guard();
+    const [plain, both] = await Promise.all([
+      app.inject({
+        method: 'GET',
+        url: `/api/v1/agents?category=uncategorized&trait=${FIXTURE_TRAIT}&per_page=100`,
+      }),
+      app.inject({
+        method: 'GET',
+        url: `/api/v1/agents?category=uncategorized&classified_only=true&trait=${FIXTURE_TRAIT}&per_page=100`,
+      }),
+    ]);
+
+    type Page = { data: { identity: { id: string } }[]; meta: { total: number } };
+    // NEWEST and OUT_OF_RANGE both hold an `uncategorized` row.
+    expect(plain.json<Page>().meta.total).toBe(2);
+
+    // Only the fixture contrived to hold both survives, which no real agent does.
+    const survivors = both.json<Page>();
+    expect(survivors.meta.total).toBe(1);
+    expect(survivors.data[0]?.identity.id).toBe(OUT_OF_RANGE);
   });
 
   it('counts each matching agent exactly once', async () => {
