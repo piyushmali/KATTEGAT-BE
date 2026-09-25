@@ -450,44 +450,50 @@ describe('GET /api/v1/agents', () => {
   });
 
   /**
-   * `category=uncategorized` combined with `classified_only=true` — the combination the
-   * frontend must never send, and why.
+   * `uncategorized` means "has no real category", not "carries an uncategorized row".
    *
-   * The two filters are independent `exists` clauses, so the API reads the pair literally: "has
-   * an uncategorized row" *and* "has a row that is not uncategorized". That is a coherent
-   * question and it is answered correctly here — OUT_OF_RANGE holds both, so it comes back.
+   * The definition had to change rather than merely move. The classifier does write an explicit
+   * `uncategorized` assignment, but 191,302 of those rows were deleted to fit the catalogue
+   * inside a 1 GB free tier during the database migration, leaving those agents unclassified by
+   * *absence* of a row. Asked for uncategorized agents, the old filter found 39 in a browsable
+   * set holding 81,827 of them — a category chip that returned almost nothing.
    *
-   * The problem is that no real agent does. The classifier returns either a single
-   * `uncategorized` assignment or real categories, never both, and `upsertMany` replaces an
-   * agent's categories rather than merging them, so nothing accumulates across taxonomy
-   * versions. Verified against the live catalogue: zero of 358,010 agents hold both.
-   *
-   * So on production data this pair is an empty grid for a category chip the user just clicked.
-   * The API is not wrong to answer it; `use-discovery-params` is responsible for not asking,
-   * which it does by dropping the flag whenever a category is named. This test pins the
-   * behaviour so the frontend guard cannot be removed as redundant.
+   * OUT_OF_RANGE is the case that pins it: it holds an `uncategorized` row *and* a real
+   * category, so the old filter counted it as uncategorized while the grid showed it under
+   * Trading & Execution. Under the corrected definition it is classified, full stop.
    */
-  it('reads category and classified_only as independent conditions', async () => {
+  it('treats uncategorized as the absence of a real category', async () => {
     guard();
-    const [plain, both] = await Promise.all([
-      app.inject({
-        method: 'GET',
-        url: `/api/v1/agents?category=uncategorized&trait=${FIXTURE_TRAIT}&per_page=100`,
-      }),
-      app.inject({
-        method: 'GET',
-        url: `/api/v1/agents?category=uncategorized&classified_only=true&trait=${FIXTURE_TRAIT}&per_page=100`,
-      }),
-    ]);
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/agents?category=uncategorized&trait=${FIXTURE_TRAIT}&per_page=100`,
+    });
 
     type Page = { data: { identity: { id: string } }[]; meta: { total: number } };
-    // NEWEST and OUT_OF_RANGE both hold an `uncategorized` row.
-    expect(plain.json<Page>().meta.total).toBe(2);
+    const body = response.json<Page>();
 
-    // Only the fixture contrived to hold both survives, which no real agent does.
-    const survivors = both.json<Page>();
-    expect(survivors.meta.total).toBe(1);
-    expect(survivors.data[0]?.identity.id).toBe(OUT_OF_RANGE);
+    // Only NEWEST, which has no real category. OUT_OF_RANGE holds one and so is classified,
+    // despite also carrying the leftover marker row.
+    expect(body.meta.total).toBe(1);
+    expect(body.data[0]?.identity.id).toBe(NEWEST);
+  });
+
+  /**
+   * The pair the frontend must never send. `uncategorized` and `classified_only` are now exact
+   * complements, so asking for both is asking for agents that do and do not have a category.
+   *
+   * The API answers honestly with nothing; not asking is `use-discovery-params`' job, which it
+   * does by dropping the flag whenever a category is named. Pinned here so that guard cannot be
+   * removed as redundant — without it, clicking the Uncategorized chip empties the grid.
+   */
+  it('returns nothing when asked for uncategorized agents that are also classified', async () => {
+    guard();
+    const response = await app.inject({
+      method: 'GET',
+      url: `/api/v1/agents?category=uncategorized&classified_only=true&trait=${FIXTURE_TRAIT}&per_page=100`,
+    });
+
+    expect(response.json<{ meta: { total: number } }>().meta.total).toBe(0);
   });
 
   it('counts each matching agent exactly once', async () => {
@@ -858,6 +864,75 @@ describe('GET /api/v1/categories', () => {
     expect(ids).toContain('grid-trading');
     expect(ids).toContain('yield-optimization');
     expect(ids).toContain('health-factor-monitoring');
+  });
+
+  /**
+   * The invariant the discovery grid's tabs depend on: a count must equal what clicking it
+   * returns, under whatever filters are in force.
+   *
+   * This is asserted as a property over every non-empty category rather than against fixed
+   * numbers, because that is the shape of the bug it guards. The counts used to be taken over
+   * `is_primary` assignments across the whole index while the grid filtered on any assignment
+   * under three active filters, and every individual number looked plausible on its own. It only
+   * read as broken in combination: "Trading & Execution 135,424" above a total of 6,191, and a
+   * Model Evaluation tab claiming 6,217 when the entire page held 6,191.
+   *
+   * Sending the filters to both endpoints is the point. Either one alone would still pass while
+   * disagreeing with the other.
+   */
+  it('reports a count for each category equal to what filtering by it returns', async () => {
+    guard();
+    const scope = `trait=${FIXTURE_TRAIT}&resolved_only=true`;
+
+    const categories = await app.inject({ method: 'GET', url: `/api/v1/categories?${scope}` });
+    expect(categories.statusCode).toBe(200);
+
+    const listed = categories
+      .json<{ data: { id: string; agent_count: number }[] }>()
+      .data.filter((category) => category.agent_count > 0);
+
+    // The fixtures span rebalancing, yield-optimization, trading-execution and uncategorized,
+    // so this is not a vacuous loop over an empty list.
+    expect(listed.length).toBeGreaterThan(1);
+
+    for (const category of listed) {
+      const page = await app.inject({
+        method: 'GET',
+        url: `/api/v1/agents?${scope}&category=${category.id}&per_page=1`,
+      });
+
+      expect(page.statusCode).toBe(200);
+      expect({
+        category: category.id,
+        total: page.json<{ meta: { total: number } }>().meta.total,
+      }).toStrictEqual({ category: category.id, total: category.agent_count });
+    }
+  });
+
+  /**
+   * Counts follow the caller's filters rather than describing the whole index.
+   *
+   * NEWEST is the only fixture with no real category, and it published no interface, so
+   * `has_endpoint=true` empties the uncategorized bucket while it is present without it. A count
+   * that ignored filters could not tell the two requests apart — which is exactly what produced
+   * a Model Evaluation tab claiming more agents than the page it sat above.
+   */
+  it('scopes counts to the filters it was given', async () => {
+    guard();
+    const [unfiltered, hireable] = await Promise.all([
+      app.inject({ method: 'GET', url: `/api/v1/categories?trait=${FIXTURE_TRAIT}` }),
+      app.inject({
+        method: 'GET',
+        url: `/api/v1/categories?trait=${FIXTURE_TRAIT}&has_endpoint=true`,
+      }),
+    ]);
+
+    type Body = { data: { id: string; agent_count: number }[] };
+    const countOf = (response: typeof unfiltered, id: string) =>
+      response.json<Body>().data.find((category) => category.id === id)?.agent_count ?? 0;
+
+    expect(countOf(unfiltered, 'uncategorized')).toBe(1);
+    expect(countOf(hireable, 'uncategorized')).toBe(0);
   });
 });
 

@@ -117,6 +117,34 @@ jobs:
           BSC_RPC_URL_FALLBACK: ${{ secrets.BSC_RPC_URL_FALLBACK }}
         run: pnpm sync:agents --backfill --loop
 
+      # Registration transaction hashes for the agents the step above just indexed.
+      #
+      # Scheduled rather than opt-in, unlike the two steps below, because it is the only one
+      # whose absence leaves a *listed* agent incomplete. Every other agent in the catalogue
+      # carries the transaction that registered it, so a visitor can verify the listing without
+      # trusting us; a new agent without one is the single row on the page that cannot be
+      # checked. It also costs almost nothing: one text column on rows that already exist.
+      #
+      # Runs after the id walk, not before, because it writes onto agents by `(chain_id,
+      # agent_id)` and silently skips ids it has not indexed yet. Reversed, every run would
+      # miss exactly the agents it was added for.
+      #
+      # No BSC_ARCHIVE_RPC_URL here, and that is deliberate rather than an omission. The
+      # archive endpoint is needed only to reach back through 45M blocks of history, which was
+      # done once from a laptop. The cursor now sits near the chain head, so an incremental run
+      # asks for recent blocks only — which the ordinary endpoint serves. Nothing scheduled
+      # depends on somebody else's free tier. See src/modules/ingestion/registration-tx.ts.
+      #
+      # `continue-on-error` because a missing hash degrades one row's provenance, while a failed
+      # step would mark the whole ingest red and hide a real problem with the id walk above.
+      - name: Harvest registration transactions
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
+          BSC_RPC_URL: ${{ secrets.BSC_RPC_URL }}
+          BSC_RPC_URL_FALLBACK: ${{ secrets.BSC_RPC_URL_FALLBACK }}
+        run: pnpm backfill:registration-tx
+
       # Registration files that discovery deferred — the ~6% published behind a
       # third-party URL rather than inline. Bounded per run because this step waits on
       # other people's web servers, and one slow host must not consume the whole budget.

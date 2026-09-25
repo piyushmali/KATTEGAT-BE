@@ -1,18 +1,4 @@
-import {
-  and,
-  arrayContains,
-  asc,
-  count,
-  desc,
-  eq,
-  gt,
-  gte,
-  ilike,
-  inArray,
-  isNull,
-  or,
-  sql,
-} from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, ilike, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { Database } from '../../infrastructure/database/client.js';
 import {
   agentCategories,
@@ -36,6 +22,7 @@ import {
   toTrustModels,
 } from './agent.types.js';
 import { decodeScore } from '../reputation/score.js';
+import { buildAgentWhere } from './agent.filters.js';
 
 /**
  * All SQL for the agents domain lives here.
@@ -246,74 +233,15 @@ function toSummary(
 }
 
 export function createAgentRepository(db: Database): AgentRepository {
-  /** Builds the shared WHERE clause for list and count so they cannot diverge. */
-  function buildWhere(filters: ListAgentsFilters) {
-    const conditions = [];
-
-    if (filters.protocolTag) {
-      conditions.push(eq(agents.protocolTag, filters.protocolTag));
-    }
-
-    if (filters.resolvedOnly === true) {
-      conditions.push(sql`${agents.metadataResolvedAt} is not null`);
-    }
-
-    /*
-     * `unconfigured` is the tag for an agent that published no interface, so this is
-     * "has somewhere to call" rather than a protocol choice. Written as an inequality against
-     * the one excluded value instead of an IN list of the four included ones, so a protocol
-     * added to the taxonomy later is included by default rather than silently filtered out.
-     */
-    if (filters.hasEndpoint === true) {
-      conditions.push(sql`${agents.protocolTag} <> 'unconfigured'`);
-    }
-
-    /*
-     * `exists` against the categories table rather than a join, for the same reason the
-     * `category` filter below uses one: an agent carries several category rows, and a join
-     * would multiply it into several result rows and inflate the count.
-     *
-     * Written as "has a row that is not uncategorized" rather than "has no uncategorized row".
-     * The classifier always assigns at least one category and gives an unplaced agent
-     * `uncategorized` explicitly, but a multi-category agent can legitimately hold both — so
-     * the negative form would exclude genuinely classified agents.
-     */
-    if (filters.classifiedOnly === true) {
-      conditions.push(
-        sql`exists (select 1 from ${agentCategories} where ${and(
-          eq(agentCategories.agentId, agents.id),
-          sql`${agentCategories.category} <> 'uncategorized'`,
-        )})`,
-      );
-    }
-
-    if (filters.query) {
-      const term = `%${filters.query}%`;
-      conditions.push(or(ilike(agents.name, term), ilike(agents.description, term)));
-    }
-
-    if (filters.traits && filters.traits.length > 0) {
-      // AND semantics via array containment. Drizzle's helper is used rather than
-      // a raw `@>` because a hand-written one binds the JS array without a
-      // `::text[]` cast, which Postgres silently matches against nothing.
-      conditions.push(arrayContains(agents.traitTags, filters.traits));
-    }
-
-    if (filters.category) {
-      const categoryConditions = [eq(agentCategories.category, filters.category)];
-      if (filters.minConfidence !== undefined) {
-        categoryConditions.push(gte(agentCategories.confidence, filters.minConfidence));
-      }
-      conditions.push(
-        sql`exists (select 1 from ${agentCategories} where ${and(
-          eq(agentCategories.agentId, agents.id),
-          ...categoryConditions,
-        )})`,
-      );
-    }
-
-    return conditions.length > 0 ? and(...conditions) : undefined;
-  }
+  /*
+   * The filter predicate lives in `agent.filters.ts`, not here.
+   *
+   * It was local to this repository while only the list and its count needed it. The
+   * category counts behind the discovery grid's tabs need the identical predicate, and
+   * keeping a second copy in the categories module is precisely how the tabs came to
+   * disagree with the grid they label.
+   */
+  const buildWhere = (filters: ListAgentsFilters) => buildAgentWhere(filters);
 
   function orderBy(sort: AgentSortField, direction: 'asc' | 'desc') {
     const dir = direction === 'asc' ? asc : desc;

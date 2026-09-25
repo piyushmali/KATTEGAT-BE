@@ -13,10 +13,12 @@
  * registered since. `--from` overrides the cursor, `--to` stops short of the head.
  */
 
+import { isNotNull, max } from 'drizzle-orm';
 import { createPublicClient, http } from 'viem';
 import { loadEnv } from '../../config/env.js';
 import { createLogger } from '../../infrastructure/logging/logger.js';
 import { createDatabase } from '../../infrastructure/database/client.js';
+import { agents } from '../../infrastructure/database/schema.js';
 import { REGISTRY_CHAIN } from '../../integrations/bsc-client.js';
 import { harvestRegistrationTxHashes, REGISTRY_DEPLOY_BLOCK } from './registration-tx.js';
 
@@ -28,6 +30,47 @@ function numericArg(name: string): number | null {
     throw new Error(`--${name} must be a non-negative integer`);
   }
   return value;
+}
+
+/**
+ * Where to resume, taken from the harvested rows rather than from the cursor.
+ *
+ * The sweep writes the hash and the block in one statement, so the highest block among agents
+ * that have a hash *is* the last block it covered. Deriving the resume point from that makes a
+ * whole class of bug impossible: a cursor can end up ahead of the data — a crash between the
+ * write and the cursor update, a `--from` override, a restore from a dump taken mid-sweep — and
+ * every agent registered in the skipped range would then be passed over silently and for good.
+ *
+ * The cursor is still written, for `/health` and for a human reading `sync_state`. It is
+ * observability now rather than state, which is the right split: one of the two can be
+ * reconstructed from the catalogue and the other cannot.
+ *
+ * The retention caveat this does not fix: on a free endpoint, logs reach back about 8,000 blocks
+ * (~100 minutes of BSC). Scheduled every 15 minutes the gap stays near 1,200 blocks, but if runs
+ * are skipped for hours the range falls outside retention and the sweep will refuse rather than
+ * skip — correctly, because skipping would lose those agents' provenance permanently. Recovery is
+ * one manual run with `BSC_ARCHIVE_RPC_URL` set, exactly as the initial backfill was.
+ */
+async function resumeBlock(
+  db: ReturnType<typeof createDatabase>['db'],
+  deployBlock: number,
+  cursorId: string,
+): Promise<number> {
+  const [row] = await db
+    .select({ block: max(agents.registeredAtBlock) })
+    .from(agents)
+    .where(isNotNull(agents.registrationTxHash));
+
+  const harvested = row?.block ?? null;
+  if (harvested !== null) return harvested + 1;
+
+  // Nothing harvested yet, so fall back to the cursor before the registry's deploy block. A
+  // cursor without rows means an earlier run recorded progress and wrote nothing, which happens
+  // when the whole range genuinely held no registrations.
+  const stored = await db.query.syncState.findFirst({
+    where: (r, { eq }) => eq(r.id, cursorId),
+  });
+  return Math.max(deployBlock, (stored?.lastBlock ?? 0) + 1);
 }
 
 async function main(): Promise<void> {
@@ -64,10 +107,7 @@ async function main(): Promise<void> {
     const deployBlock =
       env.ERC8004_DEPLOY_BLOCK > 0 ? env.ERC8004_DEPLOY_BLOCK : REGISTRY_DEPLOY_BLOCK;
 
-    const stored = await db.query.syncState.findFirst({
-      where: (row, { eq }) => eq(row.id, cursorId),
-    });
-    const fromBlock = numericArg('from') ?? Math.max(deployBlock, (stored?.lastBlock ?? 0) + 1);
+    const fromBlock = numericArg('from') ?? (await resumeBlock(db, deployBlock, cursorId));
 
     if (fromBlock > toBlock) {
       logger.info({ fromBlock, toBlock }, 'cursor is already at the head; nothing to harvest');
