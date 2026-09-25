@@ -20,32 +20,51 @@ name: Ingest agents
 #
 # Measured: 412 new agents caught up in 5 seconds, one pass.
 #
-# WHY THIS IS NO LONGER SCHEDULED
+# WHY THIS IS SCHEDULED AGAIN
 #
-# It was, every 30 minutes, and it failed every single time: there is no DATABASE_URL
-# secret, because the deployment does not want one. The deployed catalogue is a snapshot
-# and ingestion runs against the full local database, which is a deliberate decision with
-# its reasons in docs/deployment.md. So the schedule was writing nowhere, and a workflow
-# that fails on a timer is worse than no workflow: it burns the Actions allowance and
-# trains everyone to ignore a red mark that will one day mean something.
+# It was unscheduled because every timed run failed: the steps read a DATABASE_URL secret
+# that did not exist, since the deployed catalogue was a snapshot indexed from a full local
+# database. Two things have changed.
 #
-# Dispatch-only keeps the capability without the noise. Set DATABASE_URL as a secret and
-# run it by hand to bring a live database current, or re-add a schedule at the point that
-# database is meant to be continuously indexed rather than snapshotted.
+# The secret exists, under a different name. `DEPLOYED_DATABASE_URL` is already set for the
+# migrate and restore workflows, and it is the same database this should be advancing.
 #
-# COST, if a schedule is ever restored
+# And the snapshot is no longer adequate. A campaign asks users to register an agent of
+# their own and then find it here, and a catalogue frozen 28 days ago cannot show it: the
+# registration is real, on chain, and invisible. That is a broken half of the quest, not a
+# stale figure.
 #
-# Private repositories get 2,000 free Actions minutes a month and GitHub bills whole
-# minutes per job, so a 30-minute cadence is ~1,440 minutes before anything else runs, and
-# the keepalive alone needs ~4,320. Between them they do not fit. Public repositories get
-# unlimited minutes, which a hackathon submission usually wants anyway, and is the cheapest
-# way out of that arithmetic.
+# ONLY THE NEW-AGENT PASS IS SCHEDULED, AND THAT IS THE POINT
 #
-# The registry currently grows at roughly 150-275 agents an hour, so a 30-minute cadence
-# would leave the index at most ~140 agents behind out of 325,000: under 0.05%.
+# Storage is the binding constraint: 476 MB of a 1 GB free tier, with the registry growing
+# about 130 MB a month. The new-agent walk writes only genuinely new rows, so scheduled
+# growth tracks real registrations and the campaign fits with headroom.
+#
+# The metadata and reputation passes stay manual. Metadata would resolve a backlog of
+# 80,951 agents, writing a full registration file for each — storage spent on rows that are
+# already listed and browsable, to fill in descriptions. That is worth doing deliberately,
+# not on a timer that competes with the space new agents need.
+#
+# COST
+#
+# The arithmetic that made this unaffordable was a private repository: 2,000 Actions minutes
+# a month against ~1,440 for a 30-minute cadence, before the keepalive's ~4,320. Both repos
+# are public now, so minutes are unlimited and the objection is gone.
+#
+# CADENCE
+#
+# Every 15 minutes, because a builder who has just registered an agent is waiting for it.
+# GitHub throttles scheduled workflows under load and will skip runs — keepalive.yml records
+# the same — so treat this as an upper bound on freshness, not a guarantee. The id walk is
+# cursor-based, so a skipped run costs nothing: the next one catches up.
+#
+# Measured: 412 new agents caught up in 5 seconds, one pass.
 
 on:
-  # Deliberately no `schedule`. See above.
+  schedule:
+    - cron: '*/15 * * * *'
+  # Still dispatchable, and a manual run does the full three passes rather than just the
+  # new-agent walk. See the `if:` conditions below.
   workflow_dispatch:
 
 # A run that overlaps its predecessor would be refused by the database advisory lock
@@ -79,7 +98,9 @@ jobs:
       # New agents. Cheap and fast: two Multicall3 requests per 120 ids.
       - name: Index new agents
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # The deployed catalogue. Named DEPLOYED_ in the secret because the migrate and
+          # restore workflows use the same one; the app only ever reads DATABASE_URL.
+          DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
           BSC_RPC_URL: ${{ secrets.BSC_RPC_URL }}
           BSC_RPC_URL_FALLBACK: ${{ secrets.BSC_RPC_URL_FALLBACK }}
         run: pnpm sync:agents --backfill --loop
@@ -91,10 +112,15 @@ jobs:
       # `continue-on-error` because a description arriving late is not a failure: the
       # agent is already indexed and browsable, and the UI shows unresolved metadata
       # honestly rather than hiding the agent.
+      #
+      # Manual only. On a timer this would work through a backlog of 80,951 agents, writing a
+      # full registration file per row, and spend the storage a campaign needs for genuinely
+      # new registrations on filling in descriptions for agents that are already listed.
       - name: Resolve deferred registration files
+        if: github.event_name == 'workflow_dispatch'
         continue-on-error: true
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
           BSC_RPC_URL: ${{ secrets.BSC_RPC_URL }}
           IPFS_GATEWAY_URL: ${{ secrets.IPFS_GATEWAY_URL }}
         run: pnpm sync:agents --metadata --loop --limit 240
@@ -117,10 +143,15 @@ jobs:
       #
       # Last of the three steps, because it is the least urgent: a missing score degrades a
       # sort, where a missing agent is absent from the marketplace entirely.
+      #
+      # Manual only, for the same reason and one more: this updates existing rows rather than
+      # adding them, so it costs no storage, but it is the least urgent of the three. A missing
+      # score degrades a sort; a missing agent is absent from the marketplace entirely.
       - name: Sweep reputation
+        if: github.event_name == 'workflow_dispatch'
         continue-on-error: true
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
           BSC_RPC_URL: ${{ secrets.BSC_RPC_URL }}
           BSC_RPC_URL_FALLBACK: ${{ secrets.BSC_RPC_URL_FALLBACK }}
         run: pnpm sync:agents --reputation --limit 12000
