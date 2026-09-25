@@ -1,4 +1,4 @@
-import { desc, eq, sql } from 'drizzle-orm';
+import { desc, eq, inArray, sql } from 'drizzle-orm';
 import type { Database } from '../../infrastructure/database/client.js';
 import {
   agentCategories,
@@ -156,7 +156,14 @@ export function createTrackingRepository(db: Database): TrackingRepository {
           isPrimary: agentCategories.isPrimary,
         })
         .from(agentCategories)
-        .where(sql`${agentCategories.agentId} = ANY(${agentIds})`);
+        /*
+         * `inArray`, not a hand-written `= ANY(...)`. Interpolating a JS array into a `sql`
+         * template expands it into one placeholder per element, so `= ANY(${ids})` becomes
+         * `= ANY($1, $2)` — invalid SQL, and a 500 on every wallet that had actually hired while a
+         * wallet with no history returned 200 from the empty-array early return. The shape of the
+         * bug hid it: the quiet path worked and the meaningful one did not.
+         */
+        .where(inArray(agentCategories.agentId, agentIds));
 
       for (const row of rows) {
         const existing = grouped.get(row.agentId) ?? [];
