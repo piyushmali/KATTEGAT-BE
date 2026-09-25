@@ -23,7 +23,31 @@ services:
     # Singapore is the closest free region to both the operator and BSC's RPC endpoints.
     region: singapore
 
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
+    # `corepack pnpm`, not `corepack enable`, and the difference is a broken deploy.
+    #
+    # This was `corepack enable && pnpm install …`, which worked until Render's build image began
+    # shipping its own pnpm at /usr/bin/pnpm on a read-only filesystem. `corepack enable` installs
+    # itself by replacing that symlink, so it now dies before anything is installed:
+    #
+    #   Internal Error: EROFS: read-only file system, unlink '/usr/bin/pnpm'
+    #
+    # The reason `corepack enable` was here at all is the version pin: `--frozen-lockfile` compares
+    # against a lockfile format, and Render's preinstalled pnpm is not necessarily the pnpm that
+    # wrote pnpm-lock.yaml (lockfileVersion 9.0, written by the pnpm@10.33.0 in `packageManager`).
+    # Dropping corepack entirely would trade this failure for a subtler one.
+    #
+    # `corepack pnpm <args>` resolves `packageManager` and runs that exact version as a shim,
+    # writing no symlinks and touching nothing outside the project. Verified: it reports 10.33.0,
+    # matching the pin.
+    #
+    # DOWNLOAD_PROMPT is disabled because corepack asks for confirmation before fetching a version
+    # it has not cached, and a build agent has no one to answer it.
+    #
+    # `&&` rather than `;` throughout, so a failed install does not continue into a misleading
+    # TypeScript error from a half-populated node_modules.
+    buildCommand: export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 && corepack pnpm install --frozen-lockfile && corepack pnpm build
+    # Plain `pnpm` is fine here: `start` is `node dist/index.js`, so no pnpm behaviour is load
+    # bearing and whichever version the image provides will do.
     startCommand: pnpm start
 
     # Render restarts the service when this stops answering, and uses it to decide a deploy

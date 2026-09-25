@@ -36,11 +36,17 @@ jobs:
         with:
           node-version-file: .nvmrc
 
+      # `corepack pnpm`, not `corepack enable`, for the reason recorded in render.yaml:
+      # `corepack enable` installs itself by replacing the pnpm symlink, which fails outright on an
+      # image that ships its own pnpm on a read-only filesystem. It happens to work on this runner
+      # and it broke the Render build, so the robust form is used in both places rather than only in
+      # the one that failed. `corepack pnpm` resolves `packageManager` and runs that exact version
+      # as a shim, writing nothing. Note that it must then be used for every pnpm call in the job,
+      # because nothing has put a bare `pnpm` on PATH.
       - name: Install dependencies
         run: |
           set -euo pipefail
-          corepack enable
-          pnpm install --frozen-lockfile
+          corepack pnpm install --frozen-lockfile
 
       - name: Show what is already applied
         env:
@@ -55,7 +61,7 @@ jobs:
       - name: Migrate
         env:
           DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
-        run: pnpm db:migrate
+        run: corepack pnpm db:migrate
 
       # A new index has no statistics until ANALYZE runs, and the planner will ignore it in
       # favour of the sequential scan the index was added to avoid.

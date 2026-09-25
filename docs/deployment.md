@@ -249,13 +249,36 @@ The Blueprint flow reads `render.yaml`; the "New Web Service" flow does not, so
 everything in it has to be typed. Build command:
 
 ```
-corepack enable && pnpm install --frozen-lockfile && pnpm build
+export COREPACK_ENABLE_DOWNLOAD_PROMPT=0 && corepack pnpm install --frozen-lockfile && corepack pnpm build
 ```
 
-`corepack enable` so the pinned `packageManager` is honoured and
-`--frozen-lockfile` is not comparing against a different pnpm's lockfile format,
-and `&&` rather than `;` so a failed install does not go on to report a
-misleading TypeScript error.
+Corepack, so the pinned `packageManager` is honoured and `--frozen-lockfile` is not
+comparing against a different pnpm's lockfile format. `&&` rather than `;` so a
+failed install does not go on to report a misleading TypeScript error.
+
+**`corepack pnpm`, not `corepack enable`.** This said `corepack enable` until
+Render's build image began shipping its own pnpm at `/usr/bin/pnpm` on a read-only
+filesystem. `corepack enable` installs itself by replacing that symlink, so it now
+fails before anything is installed:
+
+```
+Internal Error: EROFS: read-only file system, unlink '/usr/bin/pnpm'
+```
+
+The failure is worth understanding because of what it blocks rather than what it
+says. Render keeps the last good deploy serving when a build fails, so the API
+stays up and nothing looks wrong — but **every environment variable change triggers
+a rebuild, and a failing build means the new value never takes effect.** A
+`CORS_ORIGINS` edit appears to save and changes nothing, which reads as a CORS bug
+rather than a build one.
+
+`corepack pnpm <args>` resolves `packageManager` and runs that exact version as a
+shim, writing no symlinks. `COREPACK_ENABLE_DOWNLOAD_PROMPT=0` because corepack
+asks for confirmation before fetching a version it has not cached, and a build
+agent has no one to answer.
+
+Start command stays plain `pnpm start`: it runs `node dist/index.js`, so no pnpm
+behaviour is load bearing there.
 
 Start command is `pnpm start`, health check path `/health`, and the variables are
 those in `render.yaml` plus `NODE_ENV`, `LOG_LEVEL` and `NODE_VERSION`.
