@@ -107,6 +107,29 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # Free extra keepalive, riding a schedule that already exists.
+      #
+      # This workflow runs on the same 15-minute cadence the web service sleeps on, so pinging
+      # `/live` here costs one request and buys another independent chance of landing inside the
+      # window. It is not a substitute for an external pinger — it inherits exactly the same
+      # GitHub scheduling delays keepalive.yml documents — but two unreliable pingers miss less
+      # often than one.
+      #
+      # `continue-on-error` and no failure on a bad status: this step exists to send traffic, and
+      # a sleeping or slow web service must not fail an ingest run that talks only to Postgres.
+      - name: Nudge the API awake
+        continue-on-error: true
+        env:
+          API_URL: ${{ vars.API_URL }}
+        run: |
+          set -uo pipefail
+          if [ -z "${API_URL:-}" ]; then
+            echo "API_URL not set; skipping the nudge."
+            exit 0
+          fi
+          code=$(curl -sS --max-time 120 -o /dev/null -w '%{http_code}' "$API_URL/live" || echo failed)
+          echo "GET /live -> $code"
+
       # New agents. Cheap and fast: two Multicall3 requests per 120 ids.
       - name: Index new agents
         env:

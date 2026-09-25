@@ -64,9 +64,13 @@ name: Keep the API warm
 
 on:
   schedule:
-    # Liveness. Every 10 minutes, comfortably inside the 15-minute idle window even when GitHub
-    # delays a scheduled run, which it does not guarantee to be punctual about.
-    - cron: '*/10 * * * *'
+    # Liveness. Every 5 minutes rather than 10, which does not make GitHub punctual but does mean
+    # three scheduled runs have to be dropped in a row before the 15-minute window is missed
+    # instead of two. Free on a public repository, so the only reason not to is tidiness.
+    #
+    # Still a backup, not the mechanism. See the note above: measured delivery on this repository
+    # has been every two hours or so. An external pinger is what actually keeps the service awake.
+    - cron: '*/5 * * * *'
     # Readiness. Offset off the hour so it does not collide with the liveness run.
     - cron: '7 */6 * * *'
   workflow_dispatch:
@@ -88,9 +92,14 @@ jobs:
         run: |
           set -uo pipefail
 
+          # Fails rather than exiting 0. This used to report success when the variable was
+          # missing, which is the worst available outcome: a green run history for a workflow
+          # that pinged nothing, so the service slept while the evidence said it was being kept
+          # awake. A keepalive that cannot do its job has to say so.
           if [ -z "${API_URL:-}" ]; then
-            echo "API_URL repository variable is not set; nothing to ping."
-            exit 0
+            echo "::error::API_URL repository variable is not set, so nothing was pinged."
+            echo "Set it under Settings -> Secrets and variables -> Actions -> Variables."
+            exit 1
           fi
 
           # --max-time 120, because a cold start is about a minute and the point of this request
@@ -116,8 +125,8 @@ jobs:
           set -uo pipefail
 
           if [ -z "${API_URL:-}" ]; then
-            echo "API_URL repository variable is not set; nothing to check."
-            exit 0
+            echo "::error::API_URL repository variable is not set, so nothing was checked."
+            exit 1
           fi
 
           body=$(curl -sS --max-time 120 -w '\n%{http_code}' "$API_URL/health") || {
