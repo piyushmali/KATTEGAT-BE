@@ -1,5 +1,7 @@
 # KATTEGAT — Backend
 
+[![KATTEGAT — the harbour for intelligent agents](https://kattegat.xyz/opengraph-image.jpg)](https://kattegat.xyz)
+
 **The home of autonomous agents.**
 
 **Live site: [kattegat.xyz](https://kattegat.xyz)** · API health:
