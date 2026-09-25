@@ -63,9 +63,12 @@ name: Ingest agents
 on:
   schedule:
     - cron: '*/15 * * * *'
-  # Still dispatchable, and a manual run does the full three passes rather than just the
-  # new-agent walk. See the `if:` conditions below.
   workflow_dispatch:
+    inputs:
+      full:
+        description: 'Also resolve deferred metadata and sweep reputation (writes more storage)'
+        type: boolean
+        default: false
 
 # A run that overlaps its predecessor would be refused by the database advisory lock
 # anyway. Cancelling here is cheaper than paying for a job that exits immediately.
@@ -113,11 +116,12 @@ jobs:
       # agent is already indexed and browsable, and the UI shows unresolved metadata
       # honestly rather than hiding the agent.
       #
-      # Manual only. On a timer this would work through a backlog of 80,951 agents, writing a
-      # full registration file per row, and spend the storage a campaign needs for genuinely
-      # new registrations on filling in descriptions for agents that are already listed.
+      # Opt-in, never on the timer. This would work through a backlog of 80,951 agents, writing
+      # a full registration file per row, and spend the storage a campaign needs for genuinely
+      # new registrations on filling in descriptions for agents that are already listed. Run it
+      # deliberately, with the storage headroom in front of you.
       - name: Resolve deferred registration files
-        if: github.event_name == 'workflow_dispatch'
+        if: inputs.full
         continue-on-error: true
         env:
           DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
@@ -144,11 +148,11 @@ jobs:
       # Last of the three steps, because it is the least urgent: a missing score degrades a
       # sort, where a missing agent is absent from the marketplace entirely.
       #
-      # Manual only, for the same reason and one more: this updates existing rows rather than
-      # adding them, so it costs no storage, but it is the least urgent of the three. A missing
-      # score degrades a sort; a missing agent is absent from the marketplace entirely.
+      # Opt-in for the same reason and one more: this updates existing rows rather than adding
+      # them, so it costs no storage, but it is the least urgent of the three. A missing score
+      # degrades a sort; a missing agent is absent from the marketplace entirely.
       - name: Sweep reputation
-        if: github.event_name == 'workflow_dispatch'
+        if: inputs.full
         continue-on-error: true
         env:
           DATABASE_URL: ${{ secrets.DEPLOYED_DATABASE_URL }}
