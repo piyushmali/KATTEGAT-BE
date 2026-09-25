@@ -28,6 +28,29 @@ const booleanish = z
   .enum(['true', 'false', '1', '0'])
   .transform((value) => value === 'true' || value === '1');
 
+/**
+ * A URL that treats an empty string as absent.
+ *
+ * Needed because `.default()` and `.optional()` only fire on `undefined`, and CI hands over
+ * empty strings. GitHub Actions renders `${{ secrets.MISSING }}` as `''` rather than omitting
+ * the variable, so an unset optional secret arrives as a value — and `''` fails `z.url()`
+ * before any default can apply.
+ *
+ * That cost a scheduled job: ingestion died on `BSC_RPC_URL: Invalid URL` while the code had a
+ * perfectly good public default sitting unused, which reads as a missing configuration problem
+ * rather than a parsing one. Same family as the `--env-file` note in docs: the difference
+ * between unset and set-to-empty is invisible until it is load bearing.
+ *
+ * Two helpers rather than one taking an optional fallback, because a single function returning
+ * either schema widens both results to `string | undefined`, and every consumer then has to
+ * re-check a value that is guaranteed.
+ */
+const urlWithDefault = (fallback: string) =>
+  z.preprocess((value) => (value === '' || value === undefined ? fallback : value), z.url());
+
+const optionalUrl = () =>
+  z.preprocess((value) => (value === '' ? undefined : value), z.url().optional());
+
 const envSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -46,8 +69,8 @@ const envSchema = z
       message: 'must be a postgres:// or postgresql:// connection string',
     }),
 
-    BSC_RPC_URL: z.url().default('https://bsc-rpc.publicnode.com'),
-    BSC_RPC_URL_FALLBACK: z.url().optional(),
+    BSC_RPC_URL: urlWithDefault('https://bsc-rpc.publicnode.com'),
+    BSC_RPC_URL_FALLBACK: optionalUrl(),
 
     /**
      * `.prefault` rather than `.default`: Zod's `.default()` short-circuits and
@@ -71,7 +94,7 @@ const envSchema = z
      * archive-access error rather than data. See docs/integrations.md.
      */
     ERC8004_MAX_LOOKBACK_BLOCKS: z.coerce.number().int().min(100).max(50_000_000).default(8_000),
-    IPFS_GATEWAY_URL: z.url().default('https://ipfs.io/ipfs/'),
+    IPFS_GATEWAY_URL: urlWithDefault('https://ipfs.io/ipfs/'),
 
     ERC8004_EXPLORER_ENABLED: booleanish.default(false),
     ERC8004_EXPLORER_BASE_URL: z.url().default('https://erc-8004.quicknode.com'),

@@ -53,7 +53,9 @@ describe('parseEnv', () => {
       /wildcard origin/,
     );
     // Still permitted in development, where it is a convenience not a hole.
-    expect(() => parseEnv({ ...minimal, NODE_ENV: 'development', CORS_ORIGINS: '*' })).not.toThrow();
+    expect(() =>
+      parseEnv({ ...minimal, NODE_ENV: 'development', CORS_ORIGINS: '*' }),
+    ).not.toThrow();
   });
 
   it('refuses an AI provider without credentials', () => {
@@ -65,15 +67,15 @@ describe('parseEnv', () => {
   });
 
   it('coerces booleanish flags from either spelling', () => {
-    expect(parseEnv({ ...minimal, ERC8004_EXPLORER_ENABLED: 'true' }).ERC8004_EXPLORER_ENABLED).toBe(
-      true,
-    );
+    expect(
+      parseEnv({ ...minimal, ERC8004_EXPLORER_ENABLED: 'true' }).ERC8004_EXPLORER_ENABLED,
+    ).toBe(true);
     expect(parseEnv({ ...minimal, ERC8004_EXPLORER_ENABLED: '1' }).ERC8004_EXPLORER_ENABLED).toBe(
       true,
     );
-    expect(parseEnv({ ...minimal, ERC8004_EXPLORER_ENABLED: 'false' }).ERC8004_EXPLORER_ENABLED).toBe(
-      false,
-    );
+    expect(
+      parseEnv({ ...minimal, ERC8004_EXPLORER_ENABLED: 'false' }).ERC8004_EXPLORER_ENABLED,
+    ).toBe(false);
   });
 
   it('rejects an out-of-range port', () => {
@@ -132,5 +134,42 @@ describe('HOST', () => {
     });
 
     expect(env.HOST).toBe('10.0.0.5');
+  });
+});
+
+/**
+ * An unset secret arrives as an empty string, not as absent.
+ *
+ * GitHub Actions renders `${{ secrets.MISSING }}` as `''` rather than omitting the variable, and
+ * `.default()` / `.optional()` only fire on `undefined`. So `''` reached `z.url()` and failed
+ * validation while a perfectly good default sat unused — the scheduled ingest died on
+ * "BSC_RPC_URL: Invalid URL", which reads as missing configuration rather than as a parse rule.
+ */
+describe('empty environment values', () => {
+  const required = { DATABASE_URL: 'postgresql://user:pass@host/db' };
+
+  it('treats an empty optional URL as absent and applies the default', () => {
+    const env = parseEnv({ ...required, BSC_RPC_URL: '', IPFS_GATEWAY_URL: '' });
+
+    expect(env.BSC_RPC_URL).toBe('https://bsc-rpc.publicnode.com');
+    expect(env.IPFS_GATEWAY_URL).toBe('https://ipfs.io/ipfs/');
+  });
+
+  it('leaves a genuinely optional URL undefined when empty', () => {
+    expect(
+      parseEnv({ ...required, BSC_RPC_URL_FALLBACK: '' }).BSC_RPC_URL_FALLBACK,
+    ).toBeUndefined();
+  });
+
+  it('still honours a real value', () => {
+    const env = parseEnv({ ...required, BSC_RPC_URL: 'https://example.invalid/rpc' });
+
+    expect(env.BSC_RPC_URL).toBe('https://example.invalid/rpc');
+  });
+
+  it('still rejects a non-empty value that is not a URL', () => {
+    // Empty means "not configured"; "nonsense" means someone configured it wrongly, and those
+    // must not collapse into the same silent default.
+    expect(() => parseEnv({ ...required, BSC_RPC_URL: 'nonsense' })).toThrow(/BSC_RPC_URL/);
   });
 });
