@@ -245,6 +245,16 @@ site looks broken.
 
 #### If you configure the service by hand instead
 
+**This is how the live service is configured.** `kattegat-api` was created through
+"New Web Service", so its build command, start command and environment come from
+the dashboard and `render.yaml` is documentation that Render never reads.
+
+That distinction cost a deploy cycle under deadline. A commit fixing the build
+command landed, Render checked the new commit out, and ran the old command from the
+dashboard regardless — the logs show the new SHA and the old command on adjacent
+lines, which reads like the fix did not work rather than like it was never applied.
+**Change the dashboard first, then mirror it into `render.yaml`.**
+
 The Blueprint flow reads `render.yaml`; the "New Web Service" flow does not, so
 everything in it has to be typed. Build command:
 

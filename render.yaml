@@ -1,5 +1,18 @@
 # Render blueprint for the KATTEGAT API.
 #
+# ⚠ THE LIVE SERVICE DOES NOT READ THIS FILE.
+#
+# kattegat-api was created through "New Web Service" rather than "New Blueprint", so its build
+# command, start command and environment live in the Render dashboard and this file is
+# documentation. Editing it changes nothing about the running service, which is a genuinely
+# confusing way to lose time: a commit fixing the build command deployed, Render checked the new
+# commit out, and then ran the old command from the dashboard anyway.
+#
+# So: change the dashboard, then mirror it here. Keep the two in step, because this file is what
+# anyone reads to understand the deployment and a stale copy is worse than none.
+#
+# To make this file authoritative instead, recreate the service via New Blueprint.
+#
 # Committed so the deployment is reviewable and reproducible rather than a set of choices
 # someone made in a web form once. Render reads this on "New Blueprint" and creates the service
 # with these settings.
