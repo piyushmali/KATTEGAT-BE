@@ -79,9 +79,15 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    # Generous ceiling relative to the ~1 minute this takes, so a slow RPC does not fail
-    # the run, but bounded so a hung request cannot burn the monthly minute budget.
-    timeout-minutes: 15
+    # 15 was sized against a local database, where the measured figure below holds. Against the
+    # deployed instance it is not enough to finish even one batch: 0.1 vCPU at the end of a
+    # network link turns 1,200 upserts into minutes, and a run that is cancelled mid-batch commits
+    # nothing, so three consecutive 15-minute runs advanced the cursor by zero.
+    #
+    # 50 lets a run commit many batches. The walk saves its cursor per batch, so being cut off is
+    # safe either way — the point is to be cut off having made progress rather than before the
+    # first commit. Unlimited Actions minutes on a public repo mean the only cost is wall clock.
+    timeout-minutes: 50
 
     steps:
       - uses: actions/checkout@v4
