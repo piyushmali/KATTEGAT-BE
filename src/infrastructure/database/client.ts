@@ -97,7 +97,21 @@ function hostOf(url: string): string {
 
 export function createDatabase(env: Env, options: DatabaseOptions = {}): DatabaseHandle {
   const sql = postgres(env.DATABASE_URL, {
-    max: env.NODE_ENV === 'production' ? 10 : 4,
+    /*
+     * Sized against the host's connection ceiling, not against what the app would like.
+     *
+     * The managed Postgres this runs on allows 20 connections in total and offers no pooler, and
+     * the web service is not the only consumer: the ingestion workflow opens its own pool plus a
+     * dedicated connection to hold the advisory lock, and an operator running psql takes one more.
+     * At 10 the web service alone claimed half the ceiling, and the failure when it is exhausted is
+     * not a slow query — new connections are refused outright, so ingestion starts failing while
+     * the site looks healthy.
+     *
+     * 8 leaves room for all of them. It is a ceiling on concurrency rather than a target: a pool
+     * only opens what the load asks for, and a request that waits briefly for a free connection is
+     * strictly better than one that cannot get a connection at all.
+     */
+    max: env.NODE_ENV === 'production' ? 8 : 4,
     idle_timeout: options.idleTimeoutSeconds ?? 20,
     connect_timeout: 10,
     // Server-side ceiling, set per connection. Enforced by Postgres rather than by us, so it

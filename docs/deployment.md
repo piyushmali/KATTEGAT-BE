@@ -1,7 +1,43 @@
 # Deployment
 
-Vercel for the frontend, Render for the API, Render Postgres for the database. All
-free, chosen so the marketplace stays reachable without a card.
+Vercel for the frontend, Render for the API, **Aiven for the database**. All free,
+chosen so the marketplace stays reachable without a card.
+
+> **The database moved off Render Postgres.** Render's free tier is deleted 30 days
+> after creation, which landed on 1 October — the day after the campaign launches. The
+> sections below still describe the Render Postgres setup because the mechanics of
+> snapshot, restore and `VACUUM ANALYZE` are unchanged and worth keeping; read them with
+> Aiven as the target.
+>
+> What changed, measured rather than assumed:
+>
+> | | Render free | Aiven free |
+> | --- | --- | --- |
+> | Lifetime | deleted after 30 days | no expiry |
+> | Storage | 1 GB | 1 GB |
+> | Compute | 0.1 CPU, 256 MB RAM | 1 CPU, 1 GB RAM |
+> | Connections | ~97 | **20, no pooler** |
+> | Region | chosen (Singapore) | **assigned (Bengaluru)** |
+>
+> The compute difference is the headline: a restore that failed three times against
+> Render's 0.1 CPU, cancelled at 15 minutes without committing a single batch, completed
+> in under three minutes on Aiven. Trigram search measures 69 ms including a 33 ms
+> network hop, and the visibility map is fully populated, so the index-only counts the
+> landing page depends on still work.
+>
+> The two costs are real and handled. `max_connections` is 20, so the web pool is 8
+> rather than 10 — see `infrastructure/database/client.ts` for the arithmetic. And the
+> region is Bengaluru rather than Singapore, so every query crosses roughly 50-70 ms
+> instead of staying in-region; Singapore remains the closest Render region to it.
+>
+> Aiven also powers off free services with no ongoing activity. The 15-minute ingest
+> schedule is what keeps it awake, which makes that workflow load bearing for
+> availability and not only for freshness.
+>
+> Note the database is named `defaultdb`, not `kattegat`, and connections require
+> `sslmode=require`. Ownership and privilege statements from a Render dump do not apply
+> on Aiven, so restore with `--no-owner --no-privileges`; without them the run fails on
+> roles that do not exist there.
 
 Going live changes environment values, not code. `NODE_ENV=production` is read in
 five places and only one of them changes behaviour rather than tuning: hiring
